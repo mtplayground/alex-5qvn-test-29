@@ -14,6 +14,11 @@ declare global {
         renderedX: number
         renderedY: number
       }>
+      getNodeTones: () => Array<{
+        id: string
+        label: string
+        tone: string
+      }>
     }
   }
 }
@@ -175,6 +180,12 @@ export function GraphCanvas({
             renderedY: Number(renderedPosition.y.toFixed(2)),
           }
         }),
+      getNodeTones: () =>
+        cy.nodes().map((node) => ({
+          id: node.id(),
+          label: String(node.data('label') ?? ''),
+          tone: String(node.data('tone') ?? ''),
+        })),
     }
 
     cy.on('tap', 'node', (event) => {
