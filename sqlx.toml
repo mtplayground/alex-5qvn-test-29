@@ -1,0 +1,9 @@
+[common]
+database-url-var = "DATABASE_URL"
+
+[migrate]
+migrations-dir = "migrations"
+
+[migrate.defaults]
+migration-type = "simple"
+migration-versioning = "sequential"
