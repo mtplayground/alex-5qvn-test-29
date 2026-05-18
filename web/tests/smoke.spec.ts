@@ -10,53 +10,50 @@ type GraphNodePosition = {
 test('graph playground smoke flow', async ({ page }) => {
   await page.goto('/')
 
-  await setEditorQuery(page, 'MATCH (n:Station) RETURN n LIMIT 25')
+  await setEditorQuery(page, 'MATCH (n)-[r]-(m) RETURN n, r, m LIMIT 30')
   await page.getByRole('button', { name: 'Run query' }).click()
+  await expect(page.getByText(/First edge type:/)).toBeVisible()
 
-  const initialPositions = await waitForGraphNodes(page, (positions) => positions.length >= 25)
-  expect(initialPositions.length).toBeGreaterThanOrEqual(25)
-
-  const draggedNode = initialPositions[0]
-
-  await page.evaluate(
-    ({ nodeId, deltaX, deltaY }) =>
-      window.__graphCanvasDebug?.dragNodeBy(nodeId, deltaX, deltaY),
-    {
-      nodeId: draggedNode.id,
-      deltaX: 90,
-      deltaY: 55,
-    },
+  const relationPositions = await waitForGraphNodes(
+    page,
+    (positions) => positions.length > 0,
   )
+  expect(relationPositions.length).toBeGreaterThan(0)
+  await expect
+    .poll(async () => (await readVisibleNodeColors(page)).length)
+    .toBeGreaterThanOrEqual(2)
 
-  const movedPositions = await waitForGraphNodes(page, (positions) => {
-    const movedNode = positions.find((position) => position.id === draggedNode.id)
+  await page.getByRole('button', { name: /^Station\b/ }).click()
+  await expect(page.getByText('Active scan: Station')).toBeVisible()
+  await waitForGraphNodes(page, (positions) => positions.length > 0)
 
-    if (!movedNode) {
-      return false
-    }
-
-    return (
-      Math.abs(movedNode.renderedX - draggedNode.renderedX) > 1 ||
-      Math.abs(movedNode.renderedY - draggedNode.renderedY) > 1
-    )
-  })
-
-  const movedNode = movedPositions.find((position) => position.id === draggedNode.id)
-  expect(movedNode).toBeDefined()
-  expect(
-    Math.abs((movedNode?.renderedX ?? draggedNode.renderedX) - draggedNode.renderedX) > 1 ||
-      Math.abs((movedNode?.renderedY ?? draggedNode.renderedY) - draggedNode.renderedY) > 1,
-  ).toBeTruthy()
-
-  const testStopName = `TestStop-${Date.now()}`
-  await setEditorQuery(page, `CREATE (n:Station {name:"${testStopName}"})`)
+  await setEditorQuery(page, 'MATCH (n:Station) RETURN n LIMIT 5')
   await page.getByRole('button', { name: 'Run query' }).click()
+  await expect(page.getByText('Rows: 5')).toBeVisible()
 
-  const mutationPositions = await waitForGraphNodes(page, (positions) =>
-    positions.some((position) => position.label === testStopName),
+  const stationPositions = await waitForGraphNodes(
+    page,
+    (positions) => positions.length === 5,
   )
+  expect(stationPositions).toHaveLength(5)
+  await expect(page.getByText('Nodes: 5', { exact: true })).toBeVisible()
+  await expect(page.getByText('Edges: 0', { exact: true })).toBeVisible()
 
-  expect(mutationPositions.some((position) => position.label === testStopName)).toBeTruthy()
+  await page.getByRole('button', { name: 'Use sample node' }).click()
+  await expect
+    .poll(async () => readPanelMetric(page, 'Adjacent nodes'))
+    .toBeGreaterThan(0)
+  await expect
+    .poll(async () => readPanelMetric(page, 'Incident edges'))
+    .toBeGreaterThan(0)
+
+  const clearPoint = await findClearCanvasPoint(page)
+  await page
+    .getByTestId('graph-viewport')
+    .click({ position: clearPoint, force: true })
+
+  await expect.poll(async () => readPanelMetric(page, 'Adjacent nodes')).toBe(0)
+  await expect.poll(async () => readPanelMetric(page, 'Incident edges')).toBe(0)
 })
 
 async function setEditorQuery(page: Page, query: string) {
@@ -86,5 +83,61 @@ async function waitForGraphNodes(
     })
     .not.toBeNull()
 
-  return (await readGraphNodePositions(page))
+  return await readGraphNodePositions(page)
+}
+
+async function readVisibleNodeColors(page: Page): Promise<string[]> {
+  return page.evaluate(() => {
+    const tones = window.__graphCanvasDebug?.getNodeTones() ?? []
+    return [...new Set(tones.map((entry) => entry.tone).filter(Boolean))]
+  })
+}
+
+async function findClearCanvasPoint(page: Page): Promise<{ x: number; y: number }> {
+  return page.evaluate(() => {
+    const viewport = document.querySelector<HTMLElement>('[data-testid="graph-viewport"]')
+    const positions = window.__graphCanvasDebug?.getNodePositions() ?? []
+
+    if (!viewport) {
+      return { x: 12, y: 12 }
+    }
+
+    const width = viewport.clientWidth
+    const height = viewport.clientHeight
+    const candidates = [
+      { x: 12, y: 12 },
+      { x: width - 12, y: 12 },
+      { x: 12, y: height - 12 },
+      { x: width - 12, y: height - 12 },
+      { x: Math.floor(width / 2), y: 12 },
+      { x: 12, y: Math.floor(height / 2) },
+    ]
+
+    for (const candidate of candidates) {
+      const overlapsNode = positions.some((position) => {
+        const deltaX = position.renderedX - candidate.x
+        const deltaY = position.renderedY - candidate.y
+
+        return Math.hypot(deltaX, deltaY) < 45
+      })
+
+      if (!overlapsNode) {
+        return candidate
+      }
+    }
+
+    return { x: 12, y: 12 }
+  })
+}
+
+async function readPanelMetric(page: Page, label: string): Promise<number> {
+  const line = page.getByText(new RegExp(`^${escapeRegExp(label)}:\\s`)).first()
+  const text = (await line.textContent()) ?? ''
+  const match = text.match(/:\s*(\d+)/)
+
+  return match ? Number(match[1]) : Number.NaN
+}
+
+function escapeRegExp(value: string) {
+  return value.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')
 }
