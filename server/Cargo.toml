@@ -6,3 +6,9 @@ license = "MIT"
 publish = false
 
 [dependencies]
+axum = { version = "0.7", features = ["http1", "json", "tokio"] }
+dotenvy = "0.15"
+serde = { version = "1", features = ["derive"] }
+tokio = { version = "1", features = ["macros", "net", "rt-multi-thread"] }
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter", "fmt"] }
