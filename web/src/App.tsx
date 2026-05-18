@@ -1,9 +1,8 @@
-import { useEffect, useState } from 'react'
-import { Activity, DatabaseZap, LoaderCircle, Network } from 'lucide-react'
+import { useEffect, useRef, useState } from 'react'
+import { LoaderCircle } from 'lucide-react'
 
 import { CypherEditor } from '@/components/editor/cypher-editor'
 import { GraphCanvas } from '@/components/graph/graph-canvas'
-import { AppShell } from '@/components/layout/app-shell'
 import { Button } from '@/components/ui/button'
 import { ApiError } from '@/lib/api-client'
 import {
@@ -21,37 +20,19 @@ import type {
 } from '@/lib/api-types'
 import { isGraphEdge, isGraphNode } from '@/lib/api-types'
 
-const highlights = [
-  {
-    title: 'Cypher workbench',
-    description:
-      'Compose graph queries with a focused editor surface and room for rich result views.',
-    icon: Activity,
-  },
-  {
-    title: 'PostgreSQL graph store',
-    description:
-      'Back the graph model with typed HTTP endpoints over a PostgreSQL-first Rust service.',
-    icon: DatabaseZap,
-  },
-  {
-    title: 'Visual exploration',
-    description:
-      'Reserve space for the graph canvas, schema navigation, and record inspection flows.',
-    icon: Network,
-  },
-] as const
+const INITIAL_GRAPH_QUERY = 'MATCH (n) RETURN n LIMIT 25'
 
 function App() {
   const [selectedNodeId, setSelectedNodeId] = useState<string | null>(null)
   const [inspectedNodeId, setInspectedNodeId] = useState<string | null>(null)
   const [activeLabelScan, setActiveLabelScan] = useState<string | null>(null)
   const [resultTab, setResultTab] = useState<'graph' | 'table' | 'json'>('graph')
-  const [queryText, setQueryText] = useState('MATCH (n) RETURN n LIMIT 25')
+  const [queryText, setQueryText] = useState(INITIAL_GRAPH_QUERY)
   const [canvasGraph, setCanvasGraph] = useState<GraphResult>({
     nodes: [],
     edges: [],
   })
+  const hasAutoLoadedInitialGraph = useRef(false)
   const schemaQuery = useSchemaQuery()
   const nodeExpandMutation = useNodeNeighborsMutation()
   const cypherMutation = useCypherMutation()
@@ -71,6 +52,15 @@ function App() {
       setInspectedNodeId(null)
     }
   }, [canvasNodes, inspectedNodeId])
+
+  useEffect(() => {
+    if (hasAutoLoadedInitialGraph.current || cypherMutation.isPending) {
+      return
+    }
+
+    hasAutoLoadedInitialGraph.current = true
+    executeCypherQuery(INITIAL_GRAPH_QUERY)
+  }, [cypherMutation.isPending])
 
   function handleExpandNode(nodeId: string) {
     setSelectedNodeId(nodeId)
@@ -120,14 +110,28 @@ function App() {
 
   return (
     <div className="min-h-screen bg-white/55">
-      <AppShell
-        badge="API client ready"
-        title="Graph playground workspace"
-        description="A typed frontend shell prepared for schema reads, node expansion, and Cypher execution over the Rust graph API."
-        highlights={highlights}
-      />
+      <section className="container pb-12 pt-10 sm:pt-14">
+        <div className="mb-6 flex flex-col gap-3 rounded-[1.75rem] border border-border/70 bg-card/88 px-6 py-5 shadow-panel backdrop-blur">
+          <div className="flex flex-wrap items-center justify-between gap-3">
+            <div>
+              <p className="text-xs font-semibold uppercase tracking-[0.32em] text-primary">
+                ZeroClaw
+              </p>
+              <h1 className="mt-2 text-2xl font-semibold tracking-tight text-foreground sm:text-3xl">
+                Cytoscape workspace
+              </h1>
+            </div>
+            <div className="rounded-full border border-border/70 bg-white/80 px-4 py-2 text-xs font-medium uppercase tracking-[0.24em] text-muted-foreground">
+              Root workspace
+            </div>
+          </div>
+          <p className="max-w-4xl text-sm leading-6 text-muted-foreground sm:text-base">
+            The graph canvas is the default surface for schema scans, Cypher execution,
+            node expansion, and result inspection. The initial view auto-loads the
+            sample graph query on startup.
+          </p>
+        </div>
 
-      <section className="container -mt-6 pb-12">
         <div className="grid gap-4 xl:grid-cols-[0.34fr_1fr_0.48fr]">
           <aside className="rounded-[1.75rem] border border-border/70 bg-card/92 p-6 shadow-panel backdrop-blur">
             <p className="text-xs font-semibold uppercase tracking-[0.24em] text-primary">
@@ -248,8 +252,8 @@ function App() {
                   <Button
                     variant="outline"
                     onClick={() => {
-                      setQueryText('MATCH (n) RETURN n LIMIT 25')
-                      handleRunQuery('MATCH (n) RETURN n LIMIT 25')
+                      setQueryText(INITIAL_GRAPH_QUERY)
+                      handleRunQuery(INITIAL_GRAPH_QUERY)
                     }}
                   >
                     Load sample query
