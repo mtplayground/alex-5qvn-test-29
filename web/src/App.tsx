@@ -61,16 +61,6 @@ function App() {
     canvasNodes.find((node) => node.id === inspectedNodeId) ?? null
 
   useEffect(() => {
-    if (!cypherMutation.data) {
-      return
-    }
-
-    setCanvasGraph(cypherMutation.data.graph)
-    setResultTab('graph')
-    setSelectedNodeId(null)
-  }, [cypherMutation.data])
-
-  useEffect(() => {
     if (!inspectedNodeId) {
       return
     }
@@ -96,10 +86,7 @@ function App() {
     setActiveLabelScan(label)
     setSelectedNodeId(null)
     setQueryText(`MATCH (n:${escapeCypherIdentifier(label)}) RETURN n LIMIT 50`)
-
-    cypherMutation.mutate({
-      query: `MATCH (n:${escapeCypherIdentifier(label)}) RETURN n LIMIT 50`,
-    })
+    executeCypherQuery(`MATCH (n:${escapeCypherIdentifier(label)}) RETURN n LIMIT 50`)
   }
 
   function handleRunQuery(query: string) {
@@ -109,9 +96,26 @@ function App() {
 
     setActiveLabelScan(null)
     setSelectedNodeId(null)
-    cypherMutation.mutate({
-      query,
-    })
+    executeCypherQuery(query)
+  }
+
+  function executeCypherQuery(query: string) {
+    const shouldMergeIntoCanvas = isMutationQuery(query)
+
+    cypherMutation.mutate(
+      { query },
+      {
+        onSuccess: (result) => {
+          setCanvasGraph((currentGraph) =>
+            shouldMergeIntoCanvas
+              ? mergeGraphResults(currentGraph, result.graph)
+              : result.graph,
+          )
+          setResultTab('graph')
+          setSelectedNodeId(null)
+        },
+      },
+    )
   }
 
   return (
@@ -505,6 +509,16 @@ function mergeExpandedGraph(
   currentGraph: GraphResult,
   expandedGraph: NodeNeighborsResult,
 ): GraphResult {
+  return mergeGraphResults(currentGraph, {
+    nodes: [expandedGraph.node, ...expandedGraph.nodes],
+    edges: expandedGraph.edges,
+  })
+}
+
+function mergeGraphResults(
+  currentGraph: GraphResult,
+  nextGraph: GraphResult,
+): GraphResult {
   const nodeMap = new Map<string, GraphNode>()
   const edgeMap = new Map<string, GraphEdge>()
 
@@ -512,7 +526,7 @@ function mergeExpandedGraph(
     nodeMap.set(node.id, node)
   }
 
-  for (const node of [expandedGraph.node, ...expandedGraph.nodes]) {
+  for (const node of nextGraph.nodes) {
     nodeMap.set(node.id, node)
   }
 
@@ -520,7 +534,7 @@ function mergeExpandedGraph(
     edgeMap.set(edge.id, edge)
   }
 
-  for (const edge of expandedGraph.edges) {
+  for (const edge of nextGraph.edges) {
     edgeMap.set(edge.id, edge)
   }
 
@@ -540,6 +554,12 @@ function formatJsonValue(value: unknown) {
 
 function escapeCypherIdentifier(identifier: string) {
   return `\`${identifier.replaceAll('`', '``')}\``
+}
+
+function isMutationQuery(query: string) {
+  const normalizedQuery = query.trimStart().toUpperCase()
+
+  return normalizedQuery.startsWith('CREATE') || normalizedQuery.startsWith('MERGE')
 }
 
 function ResultTable({ result }: { result: QueryResult | null }) {
