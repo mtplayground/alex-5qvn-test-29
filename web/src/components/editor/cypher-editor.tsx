@@ -122,6 +122,7 @@ type CypherEditorProps = {
   value: string
   onChange: (value: string) => void
   onRun: (value: string) => void
+  isRunning?: boolean
   className?: string
 }
 
@@ -129,6 +130,7 @@ export function CypherEditor({
   value,
   onChange,
   onRun,
+  isRunning = false,
   className,
 }: CypherEditorProps) {
   const containerRef = useRef<HTMLDivElement | null>(null)
@@ -254,7 +256,7 @@ export function CypherEditor({
     >
       <div className="flex items-center justify-between border-b border-border/70 px-4 py-3 text-[11px] font-semibold uppercase tracking-[0.24em] text-muted-foreground">
         <span>Cypher editor</span>
-        <span>Ctrl+Enter to run</span>
+        <span>{isRunning ? 'Running query…' : 'Ctrl+Enter to run'}</span>
       </div>
       <div ref={containerRef} />
     </div>

@@ -1,10 +1,11 @@
 import { useEffect, useState } from 'react'
-import { Activity, DatabaseZap, Network } from 'lucide-react'
+import { Activity, DatabaseZap, LoaderCircle, Network } from 'lucide-react'
 
 import { CypherEditor } from '@/components/editor/cypher-editor'
 import { GraphCanvas } from '@/components/graph/graph-canvas'
 import { AppShell } from '@/components/layout/app-shell'
 import { Button } from '@/components/ui/button'
+import { ApiError } from '@/lib/api-client'
 import {
   useCypherMutation,
   useNodeNeighborsMutation,
@@ -93,6 +94,10 @@ function App() {
   }
 
   function handleRunQuery(query: string) {
+    if (cypherMutation.isPending) {
+      return
+    }
+
     setActiveLabelScan(null)
     setSelectedNodeId(null)
     cypherMutation.mutate({
@@ -201,14 +206,31 @@ function App() {
                     value={queryText}
                     onChange={setQueryText}
                     onRun={handleRunQuery}
+                    isRunning={cypherMutation.isPending}
                   />
                 </div>
+                {cypherMutation.isPending ? (
+                  <div className="mt-3 flex items-center gap-2 rounded-2xl border border-primary/15 bg-primary/5 px-4 py-3 text-sm text-primary">
+                    <LoaderCircle className="h-4 w-4 animate-spin" />
+                    <span>Submitting query to `/cypher`…</span>
+                  </div>
+                ) : null}
+                {cypherMutation.error ? (
+                  <QueryErrorPanel error={cypherMutation.error} queryText={queryText} />
+                ) : null}
                 <div className="mt-4 flex flex-wrap gap-3">
                   <Button
                     onClick={() => handleRunQuery(queryText)}
                     disabled={cypherMutation.isPending}
                   >
-                    {cypherMutation.isPending ? 'Running query…' : 'Run query'}
+                    {cypherMutation.isPending ? (
+                      <>
+                        <LoaderCircle className="h-4 w-4 animate-spin" />
+                        Running query…
+                      </>
+                    ) : (
+                      'Run query'
+                    )}
                   </Button>
                   <Button
                     variant="outline"
@@ -249,9 +271,6 @@ function App() {
                     <p className="mt-2 text-muted-foreground">
                       First edge type: {cypherMutation.data.rows[0][1].type}
                     </p>
-                  ) : null}
-                  {cypherMutation.error ? (
-                    <p className="mt-2 text-destructive">{cypherMutation.error.message}</p>
                   ) : null}
                 </div>
               </article>
@@ -465,4 +484,64 @@ function formatJsonValue(value: unknown) {
 
 function escapeCypherIdentifier(identifier: string) {
   return `\`${identifier.replaceAll('`', '``')}\``
+}
+
+function QueryErrorPanel({
+  error,
+  queryText,
+}: {
+  error: Error
+  queryText: string
+}) {
+  const apiError = error instanceof ApiError ? error : null
+  const lineNumber = apiError?.line ?? null
+  const columnNumber = apiError?.col ?? null
+  const queryLines = queryText.split('\n')
+  const offendingLine =
+    lineNumber && lineNumber >= 1 && lineNumber <= queryLines.length
+      ? queryLines[lineNumber - 1]
+      : null
+  const caretIndent = offendingLine && columnNumber && columnNumber > 0
+    ? ' '.repeat(Math.max(0, columnNumber - 1))
+    : ''
+
+  return (
+    <div className="mt-3 rounded-[1.35rem] border border-destructive/30 bg-[linear-gradient(180deg,_rgba(254,242,242,0.96),_rgba(255,250,250,0.98))] p-4 text-sm shadow-inner">
+      <div className="flex items-start gap-3">
+        <div className="mt-0.5 h-2.5 w-2.5 rounded-full bg-destructive" />
+        <div className="min-w-0 flex-1">
+          <p className="font-semibold text-destructive">Query failed</p>
+          <p className="mt-1 leading-6 text-[#7f1d1d]">{error.message}</p>
+          {lineNumber ? (
+            <p className="mt-2 text-xs font-semibold uppercase tracking-[0.2em] text-[#991b1b]/80">
+              Line {lineNumber}
+              {columnNumber ? `, column ${columnNumber}` : ''}
+            </p>
+          ) : null}
+        </div>
+      </div>
+
+      {offendingLine !== null ? (
+        <div className="mt-4 overflow-hidden rounded-2xl border border-destructive/20 bg-[#2b1616] text-[13px] text-white shadow-inner">
+          <div className="flex border-b border-white/10 px-4 py-2 text-[11px] font-semibold uppercase tracking-[0.22em] text-white/55">
+            Offending line
+          </div>
+          <pre className="overflow-x-auto px-4 py-4 font-mono leading-6">
+            <span className="text-white/45">{String(lineNumber).padStart(3, ' ')}</span>
+            <span className="ml-3 text-[#fecaca]">{offendingLine}</span>
+            {columnNumber ? (
+              <>
+                {'\n'}
+                <span className="text-transparent">{String(lineNumber).padStart(3, ' ')}</span>
+                <span className="ml-3 text-[#fb7185]">
+                  {caretIndent}
+                  ^
+                </span>
+              </>
+            ) : null}
+          </pre>
+        </div>
+      ) : null}
+    </div>
+  )
 }
