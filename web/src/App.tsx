@@ -36,6 +36,7 @@ const highlights = [
 function App() {
   const [selectedNodeId, setSelectedNodeId] = useState<string | null>(null)
   const [inspectedNodeId, setInspectedNodeId] = useState<string | null>(null)
+  const [activeLabelScan, setActiveLabelScan] = useState<string | null>(null)
   const [canvasGraph, setCanvasGraph] = useState<GraphResult>({
     nodes: [],
     edges: [],
@@ -79,6 +80,15 @@ function App() {
     })
   }
 
+  function handleLabelScan(label: string) {
+    setActiveLabelScan(label)
+    setSelectedNodeId(null)
+
+    cypherMutation.mutate({
+      query: `MATCH (n:${escapeCypherIdentifier(label)}) RETURN n LIMIT 50`,
+    })
+  }
+
   return (
     <div>
       <AppShell
@@ -89,151 +99,211 @@ function App() {
       />
 
       <section className="container -mt-6 pb-12">
-        <div className="grid gap-4 lg:grid-cols-3">
-          <article className="rounded-[1.75rem] border border-border/70 bg-card/90 p-6 shadow-panel backdrop-blur">
+        <div className="grid gap-4 xl:grid-cols-[0.34fr_1fr_0.48fr]">
+          <aside className="rounded-[1.75rem] border border-border/70 bg-card/92 p-6 shadow-panel backdrop-blur">
             <p className="text-xs font-semibold uppercase tracking-[0.24em] text-primary">
-              Schema query
+              Schema sidebar
             </p>
-            <h3 className="mt-3 text-lg font-semibold">`GET /schema`</h3>
+            <h3 className="mt-3 text-lg font-semibold">Catalog + quick scans</h3>
             <p className="mt-3 text-sm leading-6 text-muted-foreground">
-              Labels and relationship types are fetched through a typed Query hook.
+              Labels and relationship types come from `GET /schema`. Click a label to run
+              a capped node scan and replace the active canvas with those results.
             </p>
-            <div className="mt-5 space-y-2 text-sm">
-              <p>
-                Labels:{' '}
-                <span className="font-medium text-foreground">
-                  {schemaQuery.data?.labels.length ?? 0}
-                </span>
-              </p>
-              <p>
-                Relationship types:{' '}
-                <span className="font-medium text-foreground">
-                  {schemaQuery.data?.relationship_types.length ?? 0}
-                </span>
-              </p>
+
+            <div className="mt-6 space-y-5">
+              <section>
+                <div className="flex items-center justify-between">
+                  <p className="text-sm font-semibold text-foreground">Labels</p>
+                  <span className="text-xs uppercase tracking-[0.18em] text-muted-foreground">
+                    {schemaQuery.data?.labels.length ?? 0}
+                  </span>
+                </div>
+                <div className="mt-3 space-y-2">
+                  {schemaQuery.data?.labels.map(({ label, count }) => {
+                    const isActive = activeLabelScan === label
+
+                    return (
+                      <button
+                        key={label}
+                        type="button"
+                        className={[
+                          'flex w-full items-center justify-between rounded-2xl border px-3 py-3 text-left text-sm transition-colors',
+                          isActive
+                            ? 'border-primary/40 bg-primary/10 text-foreground'
+                            : 'border-border/70 bg-white/60 text-foreground hover:border-primary/25 hover:bg-primary/5',
+                        ].join(' ')}
+                        onClick={() => handleLabelScan(label)}
+                      >
+                        <span className="font-medium">{label}</span>
+                        <span className="rounded-full bg-black/5 px-2.5 py-1 text-xs font-semibold text-muted-foreground">
+                          {count}
+                        </span>
+                      </button>
+                    )
+                  })}
+                  {schemaQuery.data && schemaQuery.data.labels.length === 0 ? (
+                    <p className="rounded-2xl border border-dashed border-border/80 px-4 py-4 text-sm text-muted-foreground">
+                      No labels available yet.
+                    </p>
+                  ) : null}
+                </div>
+              </section>
+
+              <section>
+                <div className="flex items-center justify-between">
+                  <p className="text-sm font-semibold text-foreground">Relationship types</p>
+                  <span className="text-xs uppercase tracking-[0.18em] text-muted-foreground">
+                    {schemaQuery.data?.relationship_types.length ?? 0}
+                  </span>
+                </div>
+                <div className="mt-3 flex flex-wrap gap-2">
+                  {schemaQuery.data?.relationship_types.map(({ type, count }) => (
+                    <div
+                      key={type}
+                      className="rounded-full border border-border/80 bg-white/70 px-3 py-2 text-xs font-medium text-foreground"
+                    >
+                      {type} · {count}
+                    </div>
+                  ))}
+                </div>
+              </section>
+
               {schemaQuery.error ? (
-                <p className="text-destructive">{schemaQuery.error.message}</p>
+                <p className="text-sm text-destructive">{schemaQuery.error.message}</p>
               ) : null}
             </div>
-          </article>
+          </aside>
 
-          <article className="rounded-[1.75rem] border border-border/70 bg-card/90 p-6 shadow-panel backdrop-blur">
-            <p className="text-xs font-semibold uppercase tracking-[0.24em] text-primary">
-              Cypher query
-            </p>
-            <h3 className="mt-3 text-lg font-semibold">`POST /cypher`</h3>
-            <p className="mt-3 text-sm leading-6 text-muted-foreground">
-              Mutations and reads share one typed result envelope with graph rows.
-            </p>
-            <Button
-              className="mt-5"
-              onClick={() =>
-                cypherMutation.mutate({
-                  query: 'MATCH (n) RETURN n LIMIT 1',
-                })
-              }
-            >
-              Run sample query
-            </Button>
-            <div className="mt-4 text-sm">
-              <p>
-                Rows:{' '}
-                <span className="font-medium text-foreground">
-                  {cypherMutation.data?.rows.length ?? 0}
-                </span>
-              </p>
-              <p>
-                Graph nodes:{' '}
-                <span className="font-medium text-foreground">
-                  {cypherMutation.data?.graph.nodes.length ?? 0}
-                </span>
-              </p>
-              {cypherMutation.data?.rows[0]?.[0] && isGraphNode(cypherMutation.data.rows[0][0]) ? (
-                <p className="mt-2 text-muted-foreground">
-                  First node labels: {cypherMutation.data.rows[0][0].labels.join(', ')}
+          <div className="space-y-4">
+            <div className="grid gap-4 lg:grid-cols-2">
+              <article className="rounded-[1.75rem] border border-border/70 bg-card/90 p-6 shadow-panel backdrop-blur">
+                <p className="text-xs font-semibold uppercase tracking-[0.24em] text-primary">
+                  Cypher query
                 </p>
-              ) : null}
-              {cypherMutation.data?.rows[0]?.[1] && isGraphEdge(cypherMutation.data.rows[0][1]) ? (
-                <p className="mt-2 text-muted-foreground">
-                  First edge type: {cypherMutation.data.rows[0][1].type}
+                <h3 className="mt-3 text-lg font-semibold">`POST /cypher`</h3>
+                <p className="mt-3 text-sm leading-6 text-muted-foreground">
+                  One-click label scans reuse this same mutation path and result envelope.
                 </p>
-              ) : null}
-              {cypherMutation.error ? (
-                <p className="mt-2 text-destructive">{cypherMutation.error.message}</p>
-              ) : null}
-            </div>
-          </article>
+                <div className="mt-5 flex flex-wrap gap-3">
+                  <Button
+                    onClick={() =>
+                      {
+                        setActiveLabelScan(null)
+                        cypherMutation.mutate({
+                          query: 'MATCH (n) RETURN n LIMIT 1',
+                        })
+                      }
+                    }
+                  >
+                    Run sample query
+                  </Button>
+                  {activeLabelScan ? (
+                    <div className="inline-flex items-center rounded-full border border-primary/20 bg-primary/10 px-3 py-2 text-xs font-semibold uppercase tracking-[0.2em] text-primary">
+                      Active scan: {activeLabelScan}
+                    </div>
+                  ) : null}
+                </div>
+                <div className="mt-4 text-sm">
+                  <p>
+                    Rows:{' '}
+                    <span className="font-medium text-foreground">
+                      {cypherMutation.data?.rows.length ?? 0}
+                    </span>
+                  </p>
+                  <p>
+                    Graph nodes:{' '}
+                    <span className="font-medium text-foreground">
+                      {cypherMutation.data?.graph.nodes.length ?? 0}
+                    </span>
+                  </p>
+                  {cypherMutation.data?.rows[0]?.[0] &&
+                  isGraphNode(cypherMutation.data.rows[0][0]) ? (
+                    <p className="mt-2 text-muted-foreground">
+                      First node labels: {cypherMutation.data.rows[0][0].labels.join(', ')}
+                    </p>
+                  ) : null}
+                  {cypherMutation.data?.rows[0]?.[1] &&
+                  isGraphEdge(cypherMutation.data.rows[0][1]) ? (
+                    <p className="mt-2 text-muted-foreground">
+                      First edge type: {cypherMutation.data.rows[0][1].type}
+                    </p>
+                  ) : null}
+                  {cypherMutation.error ? (
+                    <p className="mt-2 text-destructive">{cypherMutation.error.message}</p>
+                  ) : null}
+                </div>
+              </article>
 
-          <article className="rounded-[1.75rem] border border-border/70 bg-card/90 p-6 shadow-panel backdrop-blur">
-            <p className="text-xs font-semibold uppercase tracking-[0.24em] text-primary">
-              Node expand
-            </p>
-            <h3 className="mt-3 text-lg font-semibold">`GET /node/:id`</h3>
-            <p className="mt-3 text-sm leading-6 text-muted-foreground">
-              Double-click a canvas node to fetch neighbors and merge them into the
-              current graph without duplicating existing records.
-            </p>
-            <div className="mt-5 flex gap-3">
-              <Button
-                variant="outline"
-                onClick={() => {
-                  const firstNodeId = canvasNodes[0]?.id
+              <article className="rounded-[1.75rem] border border-border/70 bg-card/90 p-6 shadow-panel backdrop-blur">
+                <p className="text-xs font-semibold uppercase tracking-[0.24em] text-primary">
+                  Node expand
+                </p>
+                <h3 className="mt-3 text-lg font-semibold">`GET /node/:id`</h3>
+                <p className="mt-3 text-sm leading-6 text-muted-foreground">
+                  Double-click a canvas node to fetch neighbors and merge them into the
+                  current graph without duplicating existing records.
+                </p>
+                <div className="mt-5 flex gap-3">
+                  <Button
+                    variant="outline"
+                    onClick={() => {
+                      const firstNodeId = canvasNodes[0]?.id
 
-                  if (firstNodeId) {
-                    handleExpandNode(firstNodeId)
-                  }
-                }}
-              >
-                Use sample node
-              </Button>
-              <Button
-                variant="ghost"
-                onClick={() => {
-                  setSelectedNodeId(null)
-                  nodeExpandMutation.reset()
-                }}
-              >
-                Clear
-              </Button>
+                      if (firstNodeId) {
+                        handleExpandNode(firstNodeId)
+                      }
+                    }}
+                  >
+                    Use sample node
+                  </Button>
+                  <Button
+                    variant="ghost"
+                    onClick={() => {
+                      setSelectedNodeId(null)
+                      nodeExpandMutation.reset()
+                    }}
+                  >
+                    Clear
+                  </Button>
+                </div>
+                <div className="mt-4 text-sm">
+                  <p>
+                    Selected node:{' '}
+                    <span className="font-medium text-foreground">
+                      {selectedNodeId ?? 'none'}
+                    </span>
+                  </p>
+                  <p>
+                    Adjacent nodes:{' '}
+                    <span className="font-medium text-foreground">
+                      {nodeExpandMutation.data?.nodes.length ?? 0}
+                    </span>
+                  </p>
+                  <p>
+                    Incident edges:{' '}
+                    <span className="font-medium text-foreground">
+                      {nodeExpandMutation.data?.edges.length ?? 0}
+                    </span>
+                  </p>
+                  {nodeExpandMutation.isPending ? (
+                    <p className="mt-2 text-muted-foreground">Expanding node neighborhood…</p>
+                  ) : null}
+                  {nodeExpandMutation.error ? (
+                    <p className="mt-2 text-destructive">{nodeExpandMutation.error.message}</p>
+                  ) : null}
+                </div>
+              </article>
             </div>
-            <div className="mt-4 text-sm">
-              <p>
-                Selected node:{' '}
-                <span className="font-medium text-foreground">
-                  {selectedNodeId ?? 'none'}
-                </span>
-              </p>
-              <p>
-                Adjacent nodes:{' '}
-                <span className="font-medium text-foreground">
-                  {nodeExpandMutation.data?.nodes.length ?? 0}
-                </span>
-              </p>
-              <p>
-                Incident edges:{' '}
-                <span className="font-medium text-foreground">
-                  {nodeExpandMutation.data?.edges.length ?? 0}
-                </span>
-              </p>
-              {nodeExpandMutation.isPending ? (
-                <p className="mt-2 text-muted-foreground">Expanding node neighborhood…</p>
-              ) : null}
-              {nodeExpandMutation.error ? (
-                <p className="mt-2 text-destructive">{nodeExpandMutation.error.message}</p>
-              ) : null}
-            </div>
-          </article>
-        </div>
 
-        <div className="mt-4 grid gap-4 lg:grid-cols-[1.4fr_0.6fr]">
-          <GraphCanvas
-            nodes={canvasNodes}
-            edges={canvasEdges}
-            selectedNodeId={inspectedNodeId}
-            onNodeSelect={setInspectedNodeId}
-            onNodeDoubleClick={handleExpandNode}
-            onCanvasClear={() => setInspectedNodeId(null)}
-          />
+            <GraphCanvas
+              nodes={canvasNodes}
+              edges={canvasEdges}
+              selectedNodeId={inspectedNodeId}
+              onNodeSelect={setInspectedNodeId}
+              onNodeDoubleClick={handleExpandNode}
+              onCanvasClear={() => setInspectedNodeId(null)}
+            />
+          </div>
 
           <article className="rounded-[1.75rem] border border-border/70 bg-[#16373a] p-6 text-white shadow-panel">
             <p className="text-xs font-semibold uppercase tracking-[0.24em] text-white/60">
@@ -369,4 +439,8 @@ function formatJsonValue(value: unknown) {
   }
 
   return JSON.stringify(value)
+}
+
+function escapeCypherIdentifier(identifier: string) {
+  return `\`${identifier.replaceAll('`', '``')}\``
 }
