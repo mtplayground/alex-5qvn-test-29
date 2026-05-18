@@ -4,7 +4,12 @@ import { Activity, DatabaseZap, Network } from 'lucide-react'
 import { GraphCanvas } from '@/components/graph/graph-canvas'
 import { AppShell } from '@/components/layout/app-shell'
 import { Button } from '@/components/ui/button'
-import { useCypherMutation, useNodeNeighborsQuery, useSchemaQuery } from '@/lib/api-hooks'
+import {
+  useCypherMutation,
+  useNodeNeighborsMutation,
+  useSchemaQuery,
+} from '@/lib/api-hooks'
+import type { GraphEdge, GraphNode, GraphResult, NodeNeighborsResult } from '@/lib/api-types'
 import { isGraphEdge, isGraphNode } from '@/lib/api-types'
 
 const highlights = [
@@ -31,17 +36,26 @@ const highlights = [
 function App() {
   const [selectedNodeId, setSelectedNodeId] = useState<string | null>(null)
   const [inspectedNodeId, setInspectedNodeId] = useState<string | null>(null)
+  const [canvasGraph, setCanvasGraph] = useState<GraphResult>({
+    nodes: [],
+    edges: [],
+  })
   const schemaQuery = useSchemaQuery()
-  const nodeQuery = useNodeNeighborsQuery(selectedNodeId)
+  const nodeExpandMutation = useNodeNeighborsMutation()
   const cypherMutation = useCypherMutation()
-  const canvasNodes = nodeQuery.data
-    ? [nodeQuery.data.node, ...nodeQuery.data.nodes]
-    : (cypherMutation.data?.graph.nodes ?? [])
-  const canvasEdges = nodeQuery.data
-    ? nodeQuery.data.edges
-    : (cypherMutation.data?.graph.edges ?? [])
+  const canvasNodes = canvasGraph.nodes
+  const canvasEdges = canvasGraph.edges
   const inspectedNode =
     canvasNodes.find((node) => node.id === inspectedNodeId) ?? null
+
+  useEffect(() => {
+    if (!cypherMutation.data) {
+      return
+    }
+
+    setCanvasGraph(cypherMutation.data.graph)
+    setSelectedNodeId(null)
+  }, [cypherMutation.data])
 
   useEffect(() => {
     if (!inspectedNodeId) {
@@ -54,6 +68,16 @@ function App() {
       setInspectedNodeId(null)
     }
   }, [canvasNodes, inspectedNodeId])
+
+  function handleExpandNode(nodeId: string) {
+    setSelectedNodeId(nodeId)
+
+    nodeExpandMutation.mutate(nodeId, {
+      onSuccess: (result) => {
+        setCanvasGraph((currentGraph) => mergeExpandedGraph(currentGraph, result))
+      },
+    })
+  }
 
   return (
     <div>
@@ -146,16 +170,29 @@ function App() {
             </p>
             <h3 className="mt-3 text-lg font-semibold">`GET /node/:id`</h3>
             <p className="mt-3 text-sm leading-6 text-muted-foreground">
-              Use the hook once a canvas node is selected. This panel wires the typed response.
+              Double-click a canvas node to fetch neighbors and merge them into the
+              current graph without duplicating existing records.
             </p>
             <div className="mt-5 flex gap-3">
               <Button
                 variant="outline"
-                onClick={() => setSelectedNodeId(cypherMutation.data?.graph.nodes[0]?.id ?? null)}
+                onClick={() => {
+                  const firstNodeId = canvasNodes[0]?.id
+
+                  if (firstNodeId) {
+                    handleExpandNode(firstNodeId)
+                  }
+                }}
               >
                 Use sample node
               </Button>
-              <Button variant="ghost" onClick={() => setSelectedNodeId(null)}>
+              <Button
+                variant="ghost"
+                onClick={() => {
+                  setSelectedNodeId(null)
+                  nodeExpandMutation.reset()
+                }}
+              >
                 Clear
               </Button>
             </div>
@@ -169,17 +206,20 @@ function App() {
               <p>
                 Adjacent nodes:{' '}
                 <span className="font-medium text-foreground">
-                  {nodeQuery.data?.nodes.length ?? 0}
+                  {nodeExpandMutation.data?.nodes.length ?? 0}
                 </span>
               </p>
               <p>
                 Incident edges:{' '}
                 <span className="font-medium text-foreground">
-                  {nodeQuery.data?.edges.length ?? 0}
+                  {nodeExpandMutation.data?.edges.length ?? 0}
                 </span>
               </p>
-              {nodeQuery.error ? (
-                <p className="mt-2 text-destructive">{nodeQuery.error.message}</p>
+              {nodeExpandMutation.isPending ? (
+                <p className="mt-2 text-muted-foreground">Expanding node neighborhood…</p>
+              ) : null}
+              {nodeExpandMutation.error ? (
+                <p className="mt-2 text-destructive">{nodeExpandMutation.error.message}</p>
               ) : null}
             </div>
           </article>
@@ -191,6 +231,7 @@ function App() {
             edges={canvasEdges}
             selectedNodeId={inspectedNodeId}
             onNodeSelect={setInspectedNodeId}
+            onNodeDoubleClick={handleExpandNode}
             onCanvasClear={() => setInspectedNodeId(null)}
           />
 
@@ -255,7 +296,8 @@ function App() {
                   <p className="font-medium text-white">No node selected</p>
                   <p className="mt-2 leading-6 text-white/70">
                     Click a node in the graph canvas to inspect its labels and properties.
-                    Click the canvas background to clear the selection.
+                    Double-click a node to expand its neighborhood. Click the canvas
+                    background to clear the selection.
                   </p>
                 </div>
               )}
@@ -291,6 +333,35 @@ function App() {
 }
 
 export default App
+
+function mergeExpandedGraph(
+  currentGraph: GraphResult,
+  expandedGraph: NodeNeighborsResult,
+): GraphResult {
+  const nodeMap = new Map<string, GraphNode>()
+  const edgeMap = new Map<string, GraphEdge>()
+
+  for (const node of currentGraph.nodes) {
+    nodeMap.set(node.id, node)
+  }
+
+  for (const node of [expandedGraph.node, ...expandedGraph.nodes]) {
+    nodeMap.set(node.id, node)
+  }
+
+  for (const edge of currentGraph.edges) {
+    edgeMap.set(edge.id, edge)
+  }
+
+  for (const edge of expandedGraph.edges) {
+    edgeMap.set(edge.id, edge)
+  }
+
+  return {
+    nodes: [...nodeMap.values()],
+    edges: [...edgeMap.values()],
+  }
+}
 
 function formatJsonValue(value: unknown) {
   if (typeof value === 'string') {
