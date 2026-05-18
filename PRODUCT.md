@@ -2,25 +2,24 @@
 
 ## What this is
 
-Transit-themed graph playground built on PostgreSQL, a Rust `axum` backend, and a Vite/React frontend. It lets a user run a constrained Cypher subset, inspect results as graph/table/JSON, and explore a seeded demo network visually.
+Transit-themed graph playground with a Rust `axum` server and a Vite/React frontend. The app lets a user run a constrained Cypher subset, inspect schema and node neighborhoods, and explore results as a graph, table, or raw JSON.
 
 ## What it does today
 
-- Serves a browser UI and JSON API from the Rust server
-- Executes a limited Cypher subset over PostgreSQL
-- Seeds an idempotent transit dataset on demand or at startup
-- Renders graph results in Cytoscape with pan, zoom, drag, selection, and expand-on-double-click
-- Exposes schema counts and per-node neighborhood expansion
-- Includes a Playwright smoke test for the end-to-end flow
+- Serves the built SPA and JSON API from one Rust binary
+- Persists graph data locally in SQLite at `/data/graph.db`
+- Runs SQLx migrations on startup and can seed the demo network automatically
+- Exposes schema counts, node-neighbor expansion, and Cypher execution over HTTP
+- Renders query results in a browser workspace with editor, schema sidebar, graph canvas, and detail panels
 
 ## User-facing features
 
-- Query editor with CodeMirror highlighting and `Ctrl/Cmd+Enter` execution
-- Result views for `Graph`, `Table`, and `Raw JSON` without rerunning the query
+- CodeMirror-based Cypher editor with keyboard submit
+- Result tabs for graph, table, and raw JSON views
 - Schema sidebar with one-click label scans
-- Node inspector panel showing labels and properties
-- Mutation queries (`CREATE`, supported `MERGE`) merge returned graph data into the active canvas
-- Inline error display with API `error`, `line`, and `col` context
+- Interactive Cytoscape canvas for graph exploration
+- Node inspection and neighborhood expansion
+- Inline API error display with structured error details
 
 ## Backend contract
 
@@ -30,15 +29,16 @@ Transit-themed graph playground built on PostgreSQL, a Rust `axum` backend, and 
   - `GET /schema`
   - `GET /node/:id`
 - Static frontend is served from `web/dist` with SPA fallback
-- All persistent state is PostgreSQL-backed via `sqlx`
-- Error responses are JSON and consistent across parse, planner, executor, and repository failures
+- Startup flow is: open SQLite DB, run migrations, optionally seed, then serve HTTP
+- Runtime config is driven by `BIND_ADDR`, `SEED_ON_START`, and optional `DATA_DIR`
 
-## Data model and seed conventions
+## Data and seed conventions
 
-- Core graph entities are `Node` and `Edge` with JSON properties
+- Core entities are `Node` and `Edge` with JSON properties
+- Persistent state lives in SQLite, not Postgres
 - Seed data lives in `seeds/transit-network.json`
-- Current demo dataset: 345 nodes, 625 edges
-- Seed loading is idempotent and guarded by both `SEED_ON_START` and a sentinel row
+- Current demo dataset is 345 nodes and 625 edges
+- Seed loading is idempotent and guarded by `SEED_ON_START` plus a `seed_runs` sentinel
 
 ## Supported Cypher surface
 
@@ -50,6 +50,7 @@ Transit-themed graph playground built on PostgreSQL, a Rust `axum` backend, and 
 
 ## Conventions
 
-- Frontend dev server runs on `:3000` and proxies API calls to the Rust server on `:8080`
-- The Rust server expects `web/dist` to exist, even for local backend runs
-- Release flow is `npm run build` in `web/` followed by `cargo build --release`, or `./scripts/release-build.sh`
+- Frontend development runs on `:3000`; the backend serves the production bundle on `:8080`
+- The backend expects `web/dist` to exist before serving the UI
+- Release flow is frontend build first, then Rust release build
+- Production deployment is expected to use durable filesystem storage at `/data`
