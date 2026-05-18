@@ -11,7 +11,14 @@ import {
   useNodeNeighborsMutation,
   useSchemaQuery,
 } from '@/lib/api-hooks'
-import type { GraphEdge, GraphNode, GraphResult, NodeNeighborsResult } from '@/lib/api-types'
+import type {
+  GraphEdge,
+  GraphNode,
+  GraphResult,
+  NodeNeighborsResult,
+  QueryResult,
+  QueryValue,
+} from '@/lib/api-types'
 import { isGraphEdge, isGraphNode } from '@/lib/api-types'
 
 const highlights = [
@@ -39,6 +46,7 @@ function App() {
   const [selectedNodeId, setSelectedNodeId] = useState<string | null>(null)
   const [inspectedNodeId, setInspectedNodeId] = useState<string | null>(null)
   const [activeLabelScan, setActiveLabelScan] = useState<string | null>(null)
+  const [resultTab, setResultTab] = useState<'graph' | 'table' | 'json'>('graph')
   const [queryText, setQueryText] = useState('MATCH (n) RETURN n LIMIT 25')
   const [canvasGraph, setCanvasGraph] = useState<GraphResult>({
     nodes: [],
@@ -58,6 +66,7 @@ function App() {
     }
 
     setCanvasGraph(cypherMutation.data.graph)
+    setResultTab('graph')
     setSelectedNodeId(null)
   }, [cypherMutation.data])
 
@@ -336,14 +345,61 @@ function App() {
               </article>
             </div>
 
-            <GraphCanvas
-              nodes={canvasNodes}
-              edges={canvasEdges}
-              selectedNodeId={inspectedNodeId}
-              onNodeSelect={setInspectedNodeId}
-              onNodeDoubleClick={handleExpandNode}
-              onCanvasClear={() => setInspectedNodeId(null)}
-            />
+            <article className="overflow-hidden rounded-[1.75rem] border border-border/70 bg-card/92 shadow-panel backdrop-blur">
+              <div className="flex flex-wrap items-center justify-between gap-3 border-b border-border/70 px-5 py-4">
+                <div>
+                  <p className="text-xs font-semibold uppercase tracking-[0.24em] text-primary">
+                    Result views
+                  </p>
+                  <h3 className="mt-2 text-lg font-semibold">Graph, Table, Raw JSON</h3>
+                </div>
+                <div className="flex flex-wrap gap-2">
+                  {([
+                    ['graph', 'Graph'],
+                    ['table', 'Table'],
+                    ['json', 'Raw JSON'],
+                  ] as const).map(([tabKey, label]) => {
+                    const isActive = resultTab === tabKey
+
+                    return (
+                      <button
+                        key={tabKey}
+                        type="button"
+                        className={[
+                          'rounded-full border px-4 py-2 text-xs font-semibold uppercase tracking-[0.2em] transition-colors',
+                          isActive
+                            ? 'border-primary/35 bg-primary text-primary-foreground'
+                            : 'border-border/80 bg-white/70 text-muted-foreground hover:border-primary/25 hover:text-foreground',
+                        ].join(' ')}
+                        onClick={() => setResultTab(tabKey)}
+                      >
+                        {label}
+                      </button>
+                    )
+                  })}
+                </div>
+              </div>
+
+              {resultTab === 'graph' ? (
+                <GraphCanvas
+                  nodes={canvasNodes}
+                  edges={canvasEdges}
+                  selectedNodeId={inspectedNodeId}
+                  onNodeSelect={setInspectedNodeId}
+                  onNodeDoubleClick={handleExpandNode}
+                  onCanvasClear={() => setInspectedNodeId(null)}
+                  className="rounded-none border-0 shadow-none"
+                />
+              ) : null}
+
+              {resultTab === 'table' ? (
+                <ResultTable result={cypherMutation.data ?? null} />
+              ) : null}
+
+              {resultTab === 'json' ? (
+                <RawJsonPanel result={cypherMutation.data ?? null} />
+              ) : null}
+            </article>
           </div>
 
           <article className="rounded-[1.75rem] border border-border/70 bg-[#16373a] p-6 text-white shadow-panel">
@@ -486,6 +542,77 @@ function escapeCypherIdentifier(identifier: string) {
   return `\`${identifier.replaceAll('`', '``')}\``
 }
 
+function ResultTable({ result }: { result: QueryResult | null }) {
+  if (!result) {
+    return (
+      <div className="flex min-h-[28rem] items-center justify-center px-8 text-center text-sm text-muted-foreground">
+        Run a Cypher query to inspect the result table.
+      </div>
+    )
+  }
+
+  if (result.columns.length === 0) {
+    return (
+      <div className="flex min-h-[28rem] items-center justify-center px-8 text-center text-sm text-muted-foreground">
+        This query returned no table columns.
+      </div>
+    )
+  }
+
+  return (
+    <div className="overflow-x-auto">
+      <table className="min-w-full border-collapse text-sm">
+        <thead>
+          <tr className="border-b border-border/70 bg-muted/30">
+            {result.columns.map((column) => (
+              <th
+                key={column}
+                className="px-4 py-3 text-left text-xs font-semibold uppercase tracking-[0.18em] text-muted-foreground"
+              >
+                {column}
+              </th>
+            ))}
+          </tr>
+        </thead>
+        <tbody>
+          {result.rows.length > 0 ? (
+            result.rows.map((row, rowIndex) => (
+              <tr key={`row-${rowIndex}`} className="border-b border-border/60 align-top">
+                {result.columns.map((column, columnIndex) => (
+                  <td key={`${column}-${rowIndex}`} className="px-4 py-3 text-foreground">
+                    <div className="max-w-[22rem] whitespace-pre-wrap break-words leading-6">
+                      {formatQueryValue(row[columnIndex])}
+                    </div>
+                  </td>
+                ))}
+              </tr>
+            ))
+          ) : (
+            <tr>
+              <td
+                colSpan={result.columns.length}
+                className="px-4 py-8 text-center text-sm text-muted-foreground"
+              >
+                No rows returned.
+              </td>
+            </tr>
+          )}
+        </tbody>
+      </table>
+    </div>
+  )
+}
+
+function RawJsonPanel({ result }: { result: QueryResult | null }) {
+  return (
+    <div className="min-h-[28rem] overflow-auto bg-[#1c1f26] p-5">
+      <pre className="whitespace-pre-wrap break-words font-mono text-[13px] leading-6 text-[#d7e3f4]">
+        {result ? JSON.stringify(result, null, 2) : 'Run a Cypher query to inspect the raw JSON response.'}
+      </pre>
+    </div>
+  )
+}
+
 function QueryErrorPanel({
   error,
   queryText,
@@ -544,4 +671,24 @@ function QueryErrorPanel({
       ) : null}
     </div>
   )
+}
+
+function formatQueryValue(value: QueryValue | undefined) {
+  if (value === undefined) {
+    return 'null'
+  }
+
+  if (isGraphNode(value)) {
+    return `Node ${value.labels.length > 0 ? `(${value.labels.join(':')}) ` : ''}${JSON.stringify(value.properties)}`
+  }
+
+  if (isGraphEdge(value)) {
+    return `Edge [:${value.type}] ${JSON.stringify(value.properties)}`
+  }
+
+  if (typeof value === 'string') {
+    return value
+  }
+
+  return JSON.stringify(value, null, 2)
 }
