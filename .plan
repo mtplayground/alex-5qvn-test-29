@@ -1,21 +1,21 @@
 Architecture plan
 
 Project shape
-- Rust `axum` server in `server/` serves the JSON API and the built SPA from `web/dist`.
-- React + Vite frontend in `web/` owns the user workspace. `web/src/App.tsx` is the main mounted surface and `web/src/components/layout/app-shell.tsx` owns the landing/header shell.
-- Shared frontend data contracts already live in `web/src/lib/api-types.ts` and hooks in `web/src/lib/api-hooks.ts`.
+- `server/` is the Rust backend that parses Cypher, executes plans, and returns `QueryResult` payloads.
+- `web/` is the Vite + React frontend. `web/src/App.tsx` is the main workspace screen and currently owns the sample query constant plus top-level result summary rendering.
+- Frontend transport and shared payload types live under `web/src/lib/`, especially `api-client.ts`, `api-hooks.ts`, and `api-types.ts`.
 
 Module/file organization
-- Keep backend routes unchanged unless the issue exposes a missing API shape.
-- For issue #79, primary changes should stay in `web/src/App.tsx`, routing/bootstrap entrypoints such as `web/src/main.tsx` if needed, and existing graph/query hooks rather than creating a parallel state model.
-- Reuse existing `GraphResult`, schema hooks, node-expansion hooks, and Cypher mutation plumbing to load the initial graph.
+- Keep the issue localized to the frontend unless the investigation shows the API result shape is wrong.
+- The sample query constant is owned by `web/src/App.tsx`; update it there so the initial auto-load and the "Load sample query" action stay in sync.
+- Unique node counting should be computed from `QueryResult.rows` using the existing `QueryValue` graph-node discriminators from `web/src/lib/api-types.ts`, ideally as a small helper colocated in `App.tsx` unless reuse becomes obvious.
+- Preserve the backend `QueryResult.graph` contract; this issue sounds like a presentation/counting bug rather than an API-shape change.
 
 Issue dependency view
-- Only one planned issue exists: #79 Mount Cytoscape workspace as default route and auto-load initial graph.
-- It depends on already-present backend endpoints and the current Cytoscape/query workspace, so no prerequisite issue work is needed.
+- Only issue #81 is in scope for this batch: fix the sample query constant and compute the unique node count from result rows.
+- The issue depends on existing query execution and graph result rendering already present in the repo; no prerequisite issue work is required.
 
 Key design decisions
-- Treat the Cytoscape workspace as the default user entrypoint rather than a separate secondary route.
-- Auto-load the initial graph through the same frontend query path already used by manual Cypher execution so initial state and user-triggered state stay consistent.
-- Keep the initial graph query conservative and deterministic, likely matching the existing default query text, to avoid introducing a second source of truth.
-- Prefer a small bootstrap effect over a larger router refactor unless the existing entrypoint clearly requires routing changes.
+- Use one source of truth for the sample query so startup behavior and the explicit sample-query button cannot drift.
+- Compute displayed node counts from the returned rows, deduplicated by node id, rather than trusting a broader graph aggregate if the UI is supposed to reflect the tabular query result.
+- Prefer a narrow frontend-only edit over changing executor output unless inspection during implementation proves the backend is the real source of the mismatch.
