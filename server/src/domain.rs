@@ -7,6 +7,25 @@ use uuid::Uuid;
 
 pub type Properties = Map<String, Value>;
 
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, FromRow)]
+pub struct LabelCount {
+    pub label: String,
+    pub count: i64,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, FromRow)]
+pub struct RelationshipTypeCount {
+    #[serde(rename = "type")]
+    pub type_: String,
+    pub count: i64,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq)]
+pub struct SchemaCatalog {
+    pub labels: Vec<LabelCount>,
+    pub relationship_types: Vec<RelationshipTypeCount>,
+}
+
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq)]
 pub struct Node {
     pub id: Uuid,
@@ -53,7 +72,7 @@ fn decode_properties(row: &PgRow, column: &str) -> Result<Properties, sqlx::Erro
 
 #[cfg(test)]
 mod tests {
-    use super::{Edge, Node, Properties};
+    use super::{Edge, LabelCount, Node, Properties, RelationshipTypeCount, SchemaCatalog};
     use serde_json::{json, Value};
     use uuid::Uuid;
 
@@ -113,6 +132,34 @@ mod tests {
                     "name": "alpha",
                     "weight": 3
                 }
+            })
+        );
+    }
+
+    #[test]
+    fn schema_catalog_serializes_label_and_type_counts() {
+        let catalog = SchemaCatalog {
+            labels: vec![LabelCount {
+                label: "Person".to_owned(),
+                count: 3,
+            }],
+            relationship_types: vec![RelationshipTypeCount {
+                type_: "KNOWS".to_owned(),
+                count: 2,
+            }],
+        };
+
+        let json = serde_json::to_value(catalog).expect("catalog should serialize");
+
+        assert_eq!(
+            json,
+            json!({
+                "labels": [
+                    { "label": "Person", "count": 3 }
+                ],
+                "relationship_types": [
+                    { "type": "KNOWS", "count": 2 }
+                ]
             })
         );
     }
