@@ -249,6 +249,7 @@ export function CypherEditor({
 
   return (
     <div
+      data-testid="cypher-editor"
       className={cn(
         'overflow-hidden rounded-[1.35rem] border border-border/80 bg-[linear-gradient(180deg,_rgba(255,255,255,0.9),_rgba(240,248,245,0.96))] shadow-inner',
         className,

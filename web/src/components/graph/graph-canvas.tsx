@@ -1,4 +1,4 @@
-import { useEffect, useRef } from 'react'
+import { useEffect, useRef, useState } from 'react'
 import cytoscape, { type LayoutOptions } from 'cytoscape'
 import coseBilkent from 'cytoscape-cose-bilkent'
 
@@ -6,6 +6,20 @@ import { cn } from '@/lib/utils'
 import type { GraphEdge, GraphNode } from '@/lib/api-types'
 
 cytoscape.use(coseBilkent)
+
+declare global {
+  interface Window {
+    __graphCanvasDebug?: {
+      dragNodeBy: (nodeId: string, deltaX: number, deltaY: number) => boolean
+      getNodePositions: () => Array<{
+        id: string
+        label: string
+        renderedX: number
+        renderedY: number
+      }>
+    }
+  }
+}
 
 const palette = [
   '#0f766e',
@@ -37,6 +51,12 @@ export function GraphCanvas({
   onCanvasClear,
   className,
 }: GraphCanvasProps) {
+  const [nodePositions, setNodePositions] = useState<Array<{
+    id: string
+    label: string
+    renderedX: number
+    renderedY: number
+  }>>([])
   const containerRef = useRef<HTMLDivElement | null>(null)
   const cyRef = useRef<cytoscape.Core | null>(null)
   const onNodeSelectRef = useRef(onNodeSelect)
@@ -147,6 +167,38 @@ export function GraphCanvas({
     })
 
     cyRef.current = cy
+    syncNodePositions(cy, setNodePositions)
+    const initialPositionTimer = window.setTimeout(() => {
+      syncNodePositions(cy, setNodePositions)
+    }, 0)
+    window.__graphCanvasDebug = {
+      dragNodeBy: (nodeId, deltaX, deltaY) => {
+        const node = cy.$id(nodeId)
+
+        if (node.empty()) {
+          return false
+        }
+
+        const currentPosition = node.position()
+        node.position({
+          x: currentPosition.x + deltaX,
+          y: currentPosition.y + deltaY,
+        })
+        syncNodePositions(cy, setNodePositions)
+        return true
+      },
+      getNodePositions: () =>
+        cy.nodes().map((node) => {
+          const renderedPosition = node.renderedPosition()
+
+          return {
+            id: node.id(),
+            label: String(node.data('label') ?? ''),
+            renderedX: Number(renderedPosition.x.toFixed(2)),
+            renderedY: Number(renderedPosition.y.toFixed(2)),
+          }
+        }),
+    }
 
     cy.on('tap', 'node', (event) => {
       const nodeId = event.target.id()
@@ -175,6 +227,10 @@ export function GraphCanvas({
       }
     })
 
+    cy.on('dragfree', 'node', () => {
+      syncNodePositions(cy, setNodePositions)
+    })
+
     if (selectedNodeId) {
       const selectedNode = cy.$id(selectedNodeId)
 
@@ -184,7 +240,10 @@ export function GraphCanvas({
     }
 
     return () => {
+      window.clearTimeout(initialPositionTimer)
+      delete window.__graphCanvasDebug
       cyRef.current = null
+      setNodePositions([])
       cy.destroy()
     }
   }, [edges, nodes])
@@ -211,6 +270,7 @@ export function GraphCanvas({
 
   return (
     <div
+      data-testid="graph-canvas"
       className={cn(
         'relative overflow-hidden rounded-[1.75rem] border border-border/70 bg-[linear-gradient(160deg,_rgba(255,255,255,0.94),_rgba(235,248,245,0.96))] shadow-panel',
         className,
@@ -222,13 +282,16 @@ export function GraphCanvas({
       </div>
       <div className="relative h-[28rem]">
         {nodes.length > 0 ? (
-          <div ref={containerRef} className="h-full w-full" />
+          <div ref={containerRef} className="h-full w-full" data-testid="graph-viewport" />
         ) : (
           <div className="flex h-full items-center justify-center px-8 text-center text-sm text-muted-foreground">
             Run a Cypher query or select a node expansion to populate the canvas.
           </div>
         )}
       </div>
+      <pre className="sr-only" data-testid="graph-node-positions">
+        {JSON.stringify(nodePositions)}
+      </pre>
     </div>
   )
 }
@@ -241,4 +304,29 @@ function colorForSeed(seed: string) {
   }
 
   return palette[hash % palette.length]
+}
+
+function syncNodePositions(
+  cy: cytoscape.Core,
+  setNodePositions: (
+    value: Array<{
+      id: string
+      label: string
+      renderedX: number
+      renderedY: number
+    }>,
+  ) => void,
+) {
+  setNodePositions(
+    cy.nodes().map((node) => {
+      const renderedPosition = node.renderedPosition()
+
+      return {
+        id: node.id(),
+        label: String(node.data('label') ?? ''),
+        renderedX: Number(renderedPosition.x.toFixed(2)),
+        renderedY: Number(renderedPosition.y.toFixed(2)),
+      }
+    }),
+  )
 }
