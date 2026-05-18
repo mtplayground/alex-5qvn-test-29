@@ -1,4 +1,4 @@
-import { useState } from 'react'
+import { useEffect, useState } from 'react'
 import { Activity, DatabaseZap, Network } from 'lucide-react'
 
 import { GraphCanvas } from '@/components/graph/graph-canvas'
@@ -30,6 +30,7 @@ const highlights = [
 
 function App() {
   const [selectedNodeId, setSelectedNodeId] = useState<string | null>(null)
+  const [inspectedNodeId, setInspectedNodeId] = useState<string | null>(null)
   const schemaQuery = useSchemaQuery()
   const nodeQuery = useNodeNeighborsQuery(selectedNodeId)
   const cypherMutation = useCypherMutation()
@@ -39,6 +40,20 @@ function App() {
   const canvasEdges = nodeQuery.data
     ? nodeQuery.data.edges
     : (cypherMutation.data?.graph.edges ?? [])
+  const inspectedNode =
+    canvasNodes.find((node) => node.id === inspectedNodeId) ?? null
+
+  useEffect(() => {
+    if (!inspectedNodeId) {
+      return
+    }
+
+    const hasSelectedNode = canvasNodes.some((node) => node.id === inspectedNodeId)
+
+    if (!hasSelectedNode) {
+      setInspectedNodeId(null)
+    }
+  }, [canvasNodes, inspectedNodeId])
 
   return (
     <div>
@@ -171,28 +186,101 @@ function App() {
         </div>
 
         <div className="mt-4 grid gap-4 lg:grid-cols-[1.4fr_0.6fr]">
-          <GraphCanvas nodes={canvasNodes} edges={canvasEdges} />
+          <GraphCanvas
+            nodes={canvasNodes}
+            edges={canvasEdges}
+            selectedNodeId={inspectedNodeId}
+            onNodeSelect={setInspectedNodeId}
+            onCanvasClear={() => setInspectedNodeId(null)}
+          />
 
           <article className="rounded-[1.75rem] border border-border/70 bg-[#16373a] p-6 text-white shadow-panel">
             <p className="text-xs font-semibold uppercase tracking-[0.24em] text-white/60">
-              Canvas behavior
+              Node inspector
             </p>
             <h3 className="mt-3 text-lg font-semibold">
-              Cytoscape + `cose-bilkent`
+              Selection details
             </h3>
             <div className="mt-4 space-y-4 text-sm text-white/78">
-              <p>
-                The canvas accepts typed `nodes` and `edges`, runs a force-directed layout,
-                and leaves dragging, panning, and zooming enabled by default.
-              </p>
-              <p>
-                Node color is derived from the label set, while edge color is derived from
-                the relationship type so the visual system stays stable across fetches.
-              </p>
+              {inspectedNode ? (
+                <>
+                  <div className="rounded-2xl border border-white/10 bg-white/5 p-4">
+                    <p className="text-xs font-semibold uppercase tracking-[0.2em] text-white/55">
+                      Node id
+                    </p>
+                    <p className="mt-2 break-all font-medium text-white">
+                      {inspectedNode.id}
+                    </p>
+                  </div>
+
+                  <div className="rounded-2xl border border-white/10 bg-white/5 p-4">
+                    <p className="text-xs font-semibold uppercase tracking-[0.2em] text-white/55">
+                      Labels
+                    </p>
+                    <div className="mt-3 flex flex-wrap gap-2">
+                      {inspectedNode.labels.map((label) => (
+                        <span
+                          key={label}
+                          className="rounded-full border border-white/10 bg-white/10 px-3 py-1 text-xs font-medium text-white"
+                        >
+                          {label}
+                        </span>
+                      ))}
+                    </div>
+                  </div>
+
+                  <div className="rounded-2xl border border-white/10 bg-white/5 p-4">
+                    <p className="text-xs font-semibold uppercase tracking-[0.2em] text-white/55">
+                      Properties
+                    </p>
+                    <dl className="mt-3 space-y-3">
+                      {Object.entries(inspectedNode.properties).map(([key, value]) => (
+                        <div
+                          key={key}
+                          className="border-b border-white/10 pb-3 last:border-b-0 last:pb-0"
+                        >
+                          <dt className="text-xs uppercase tracking-[0.18em] text-white/55">
+                            {key}
+                          </dt>
+                          <dd className="mt-1 break-words font-medium text-white">
+                            {formatJsonValue(value)}
+                          </dd>
+                        </div>
+                      ))}
+                    </dl>
+                  </div>
+                </>
+              ) : (
+                <div className="rounded-2xl border border-dashed border-white/15 bg-white/5 p-5">
+                  <p className="font-medium text-white">No node selected</p>
+                  <p className="mt-2 leading-6 text-white/70">
+                    Click a node in the graph canvas to inspect its labels and properties.
+                    Click the canvas background to clear the selection.
+                  </p>
+                </div>
+              )}
+
               <div className="rounded-2xl border border-white/10 bg-white/5 p-4">
                 <p className="font-medium text-white">Current graph payload</p>
                 <p className="mt-2">Nodes: {canvasNodes.length}</p>
                 <p>Edges: {canvasEdges.length}</p>
+              </div>
+
+              <div className="flex gap-3">
+                <Button
+                  variant="outline"
+                  className="border-white/20 bg-transparent text-white hover:bg-white/10 hover:text-white"
+                  onClick={() => setInspectedNodeId(canvasNodes[0]?.id ?? null)}
+                >
+                  Select first node
+                </Button>
+                <Button
+                  variant="ghost"
+                  className="text-white hover:bg-white/10 hover:text-white"
+                  onClick={() => setInspectedNodeId(null)}
+                >
+                  Clear selection
+                </Button>
               </div>
             </div>
           </article>
@@ -203,3 +291,11 @@ function App() {
 }
 
 export default App
+
+function formatJsonValue(value: unknown) {
+  if (typeof value === 'string') {
+    return value
+  }
+
+  return JSON.stringify(value)
+}

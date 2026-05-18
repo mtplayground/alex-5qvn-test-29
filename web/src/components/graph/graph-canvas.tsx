@@ -21,11 +21,29 @@ const palette = [
 export type GraphCanvasProps = {
   nodes: GraphNode[]
   edges: GraphEdge[]
+  selectedNodeId?: string | null
+  onNodeSelect?: (nodeId: string) => void
+  onCanvasClear?: () => void
   className?: string
 }
 
-export function GraphCanvas({ nodes, edges, className }: GraphCanvasProps) {
+export function GraphCanvas({
+  nodes,
+  edges,
+  selectedNodeId,
+  onNodeSelect,
+  onCanvasClear,
+  className,
+}: GraphCanvasProps) {
   const containerRef = useRef<HTMLDivElement | null>(null)
+  const cyRef = useRef<cytoscape.Core | null>(null)
+  const onNodeSelectRef = useRef(onNodeSelect)
+  const onCanvasClearRef = useRef(onCanvasClear)
+
+  useEffect(() => {
+    onNodeSelectRef.current = onNodeSelect
+    onCanvasClearRef.current = onCanvasClear
+  }, [onCanvasClear, onNodeSelect])
 
   useEffect(() => {
     if (!containerRef.current || nodes.length === 0) {
@@ -123,10 +141,52 @@ export function GraphCanvas({ nodes, edges, className }: GraphCanvasProps) {
       } as unknown as LayoutOptions,
     })
 
+    cyRef.current = cy
+
+    cy.on('tap', 'node', (event) => {
+      onNodeSelectRef.current?.(event.target.id())
+    })
+
+    cy.on('tap', (event) => {
+      if (event.target === cy) {
+        cy.elements().unselect()
+        onCanvasClearRef.current?.()
+      }
+    })
+
+    if (selectedNodeId) {
+      const selectedNode = cy.$id(selectedNodeId)
+
+      if (selectedNode.nonempty()) {
+        selectedNode.select()
+      }
+    }
+
     return () => {
+      cyRef.current = null
       cy.destroy()
     }
   }, [edges, nodes])
+
+  useEffect(() => {
+    const cy = cyRef.current
+
+    if (!cy) {
+      return
+    }
+
+    cy.elements().unselect()
+
+    if (!selectedNodeId) {
+      return
+    }
+
+    const selectedNode = cy.$id(selectedNodeId)
+
+    if (selectedNode.nonempty()) {
+      selectedNode.select()
+    }
+  }, [selectedNodeId])
 
   return (
     <div
