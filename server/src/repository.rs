@@ -1,13 +1,25 @@
 use serde_json::{Map, Value};
 use sqlx::types::Json;
-use sqlx::PgPool;
+use sqlx::{PgPool, Row};
+use std::collections::HashSet;
 use uuid::Uuid;
 
-use crate::domain::{Node, Properties};
+use crate::domain::{Edge, Node, Properties};
 
 #[derive(Clone, Debug)]
 pub struct NodeRepository {
     pool: PgPool,
+}
+
+#[derive(Clone, Debug)]
+pub struct EdgeRepository {
+    pool: PgPool,
+}
+
+#[derive(Clone, Debug, PartialEq)]
+pub struct NeighborExpansion {
+    pub edges: Vec<Edge>,
+    pub nodes: Vec<Node>,
 }
 
 impl NodeRepository {
@@ -83,17 +95,157 @@ impl NodeRepository {
     }
 }
 
+impl EdgeRepository {
+    pub fn new(pool: PgPool) -> Self {
+        Self { pool }
+    }
+
+    pub async fn insert(&self, edge: &Edge) -> Result<Edge, sqlx::Error> {
+        sqlx::query_as::<_, Edge>(
+            r#"
+            INSERT INTO edges (id, start_id, end_id, type, properties)
+            VALUES ($1, $2, $3, $4, $5)
+            RETURNING id, start_id, end_id, type, properties
+            "#,
+        )
+        .bind(edge.id)
+        .bind(edge.start_id)
+        .bind(edge.end_id)
+        .bind(&edge.type_)
+        .bind(Json(&edge.properties))
+        .fetch_one(&self.pool)
+        .await
+    }
+
+    pub async fn list_outgoing(
+        &self,
+        node_id: Uuid,
+        edge_type: Option<&str>,
+    ) -> Result<Vec<Edge>, sqlx::Error> {
+        list_edges_by_endpoint(&self.pool, "start_id", node_id, edge_type).await
+    }
+
+    pub async fn list_incoming(
+        &self,
+        node_id: Uuid,
+        edge_type: Option<&str>,
+    ) -> Result<Vec<Edge>, sqlx::Error> {
+        list_edges_by_endpoint(&self.pool, "end_id", node_id, edge_type).await
+    }
+
+    pub async fn expand_neighbors(
+        &self,
+        node_id: Uuid,
+        edge_type: Option<&str>,
+    ) -> Result<NeighborExpansion, sqlx::Error> {
+        let rows = sqlx::query(
+            r#"
+            SELECT
+                e.id AS edge_id,
+                e.start_id,
+                e.end_id,
+                e.type,
+                e.properties AS edge_properties,
+                n.id AS node_id,
+                n.labels AS node_labels,
+                n.properties AS node_properties
+            FROM edges e
+            JOIN nodes n
+              ON n.id = CASE
+                    WHEN e.start_id = $1 THEN e.end_id
+                    ELSE e.start_id
+                END
+            WHERE (e.start_id = $1 OR e.end_id = $1)
+              AND ($2::TEXT IS NULL OR e.type = $2)
+            ORDER BY e.id ASC, n.id ASC
+            "#,
+        )
+        .bind(node_id)
+        .bind(edge_type)
+        .fetch_all(&self.pool)
+        .await?;
+
+        build_neighbor_expansion(rows)
+    }
+}
+
 fn property_filter_value(key: &str, value: Value) -> Properties {
     let mut properties = Map::with_capacity(1);
     properties.insert(key.to_owned(), value);
     properties
 }
 
+async fn list_edges_by_endpoint(
+    pool: &PgPool,
+    endpoint_column: &str,
+    node_id: Uuid,
+    edge_type: Option<&str>,
+) -> Result<Vec<Edge>, sqlx::Error> {
+    let query = format!(
+        r#"
+        SELECT id, start_id, end_id, type, properties
+        FROM edges
+        WHERE {endpoint_column} = $1
+          AND ($2::TEXT IS NULL OR type = $2)
+        ORDER BY id ASC
+        "#
+    );
+
+    sqlx::query_as::<_, Edge>(&query)
+        .bind(node_id)
+        .bind(edge_type)
+        .fetch_all(pool)
+        .await
+}
+
+fn build_neighbor_expansion(rows: Vec<sqlx::postgres::PgRow>) -> Result<NeighborExpansion, sqlx::Error> {
+    let mut edges = Vec::with_capacity(rows.len());
+    let mut nodes = Vec::with_capacity(rows.len());
+    let mut seen_edge_ids = HashSet::with_capacity(rows.len());
+    let mut seen_node_ids = HashSet::with_capacity(rows.len());
+
+    for row in rows {
+        let edge = Edge {
+            id: row.try_get("edge_id")?,
+            start_id: row.try_get("start_id")?,
+            end_id: row.try_get("end_id")?,
+            type_: row.try_get("type")?,
+            properties: decode_json_properties(&row, "edge_properties")?,
+        };
+
+        if seen_edge_ids.insert(edge.id) {
+            edges.push(edge);
+        }
+
+        let node = Node {
+            id: row.try_get("node_id")?,
+            labels: row.try_get("node_labels")?,
+            properties: decode_json_properties(&row, "node_properties")?,
+        };
+
+        if seen_node_ids.insert(node.id) {
+            nodes.push(node);
+        }
+    }
+
+    Ok(NeighborExpansion { edges, nodes })
+}
+
+fn decode_json_properties(
+    row: &sqlx::postgres::PgRow,
+    column: &str,
+) -> Result<Properties, sqlx::Error> {
+    let Json(properties) = row.try_get::<Json<Properties>, _>(column)?;
+    Ok(properties)
+}
+
 #[cfg(test)]
 mod tests {
     use serde_json::{json, Value};
+    use uuid::Uuid;
 
-    use super::property_filter_value;
+    use super::{property_filter_value, Edge, NeighborExpansion, Node};
+    use crate::domain::Properties;
 
     #[test]
     fn property_filter_value_wraps_key_and_value_for_jsonb_contains() {
@@ -107,5 +259,42 @@ mod tests {
         let filter = property_filter_value("active", Value::Bool(true));
 
         assert_eq!(json!(filter), json!({ "active": true }));
+    }
+
+    #[test]
+    fn neighbor_expansion_keeps_unique_edges_and_nodes() {
+        let expansion = NeighborExpansion {
+            edges: vec![sample_edge(Uuid::nil(), Uuid::from_u128(2))],
+            nodes: vec![sample_node(Uuid::from_u128(2))],
+        };
+
+        assert_eq!(expansion.edges.len(), 1);
+        assert_eq!(expansion.nodes.len(), 1);
+        assert_eq!(expansion.edges[0].type_, "KNOWS");
+    }
+
+    fn sample_node(id: Uuid) -> Node {
+        Node {
+            id,
+            labels: vec!["Person".to_owned()],
+            properties: sample_properties(),
+        }
+    }
+
+    fn sample_edge(id: Uuid, adjacent_id: Uuid) -> Edge {
+        Edge {
+            id,
+            start_id: Uuid::from_u128(1),
+            end_id: adjacent_id,
+            type_: "KNOWS".to_owned(),
+            properties: sample_properties(),
+        }
+    }
+
+    fn sample_properties() -> Properties {
+        match json!({ "name": "alice" }) {
+            Value::Object(map) => map,
+            _ => unreachable!(),
+        }
     }
 }
