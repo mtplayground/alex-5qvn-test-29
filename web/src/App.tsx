@@ -1,6 +1,7 @@
 import { useState } from 'react'
 import { Activity, DatabaseZap, Network } from 'lucide-react'
 
+import { GraphCanvas } from '@/components/graph/graph-canvas'
 import { AppShell } from '@/components/layout/app-shell'
 import { Button } from '@/components/ui/button'
 import { useCypherMutation, useNodeNeighborsQuery, useSchemaQuery } from '@/lib/api-hooks'
@@ -32,6 +33,12 @@ function App() {
   const schemaQuery = useSchemaQuery()
   const nodeQuery = useNodeNeighborsQuery(selectedNodeId)
   const cypherMutation = useCypherMutation()
+  const canvasNodes = nodeQuery.data
+    ? [nodeQuery.data.node, ...nodeQuery.data.nodes]
+    : (cypherMutation.data?.graph.nodes ?? [])
+  const canvasEdges = nodeQuery.data
+    ? nodeQuery.data.edges
+    : (cypherMutation.data?.graph.edges ?? [])
 
   return (
     <div>
@@ -159,6 +166,34 @@ function App() {
               {nodeQuery.error ? (
                 <p className="mt-2 text-destructive">{nodeQuery.error.message}</p>
               ) : null}
+            </div>
+          </article>
+        </div>
+
+        <div className="mt-4 grid gap-4 lg:grid-cols-[1.4fr_0.6fr]">
+          <GraphCanvas nodes={canvasNodes} edges={canvasEdges} />
+
+          <article className="rounded-[1.75rem] border border-border/70 bg-[#16373a] p-6 text-white shadow-panel">
+            <p className="text-xs font-semibold uppercase tracking-[0.24em] text-white/60">
+              Canvas behavior
+            </p>
+            <h3 className="mt-3 text-lg font-semibold">
+              Cytoscape + `cose-bilkent`
+            </h3>
+            <div className="mt-4 space-y-4 text-sm text-white/78">
+              <p>
+                The canvas accepts typed `nodes` and `edges`, runs a force-directed layout,
+                and leaves dragging, panning, and zooming enabled by default.
+              </p>
+              <p>
+                Node color is derived from the label set, while edge color is derived from
+                the relationship type so the visual system stays stable across fetches.
+              </p>
+              <div className="rounded-2xl border border-white/10 bg-white/5 p-4">
+                <p className="font-medium text-white">Current graph payload</p>
+                <p className="mt-2">Nodes: {canvasNodes.length}</p>
+                <p>Edges: {canvasEdges.length}</p>
+              </div>
             </div>
           </article>
         </div>
