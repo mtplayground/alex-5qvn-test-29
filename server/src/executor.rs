@@ -1,4 +1,4 @@
-use std::collections::{BTreeMap, HashMap};
+use std::collections::{BTreeMap, HashMap, HashSet};
 
 use serde::{Deserialize, Serialize};
 use serde_json::{Map, Number, Value as JsonValue};
@@ -24,10 +24,19 @@ pub enum Value {
 }
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
-pub struct ExecutionResult {
+pub struct GraphResult {
+    pub nodes: Vec<Node>,
+    pub edges: Vec<Edge>,
+}
+
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub struct QueryResult {
     pub columns: Vec<String>,
     pub rows: Vec<Vec<Value>>,
+    pub graph: GraphResult,
 }
+
+pub type ExecutionResult = QueryResult;
 
 #[derive(Clone, Debug, PartialEq)]
 pub struct ExecutorError {
@@ -48,7 +57,7 @@ pub struct Executor {
     edges: EdgeRepository,
 }
 
-pub async fn execute_plan(pool: PgPool, plan: &LogicalPlan) -> Result<ExecutionResult, ExecutorError> {
+pub async fn execute_plan(pool: PgPool, plan: &LogicalPlan) -> Result<QueryResult, ExecutorError> {
     Executor::new(pool).execute(plan).await
 }
 
@@ -60,7 +69,7 @@ impl Executor {
         }
     }
 
-    pub async fn execute(&self, plan: &LogicalPlan) -> Result<ExecutionResult, ExecutorError> {
+    pub async fn execute(&self, plan: &LogicalPlan) -> Result<QueryResult, ExecutorError> {
         let mut rows: Vec<BindingRow> = Vec::new();
         let mut projected = None;
 
@@ -369,7 +378,7 @@ impl Executor {
         &self,
         projection: &Projection,
         input: &[BindingRow],
-    ) -> Result<ExecutionResult, ExecutorError> {
+    ) -> Result<QueryResult, ExecutorError> {
         let columns = projection_columns(projection, input);
         let mut rows = Vec::with_capacity(input.len());
 
@@ -400,7 +409,7 @@ impl Executor {
             rows.push(tuple);
         }
 
-        Ok(ExecutionResult { columns, rows })
+        Ok(build_query_result(columns, rows))
     }
 }
 
@@ -428,7 +437,7 @@ fn projection_columns(projection: &Projection, rows: &[BindingRow]) -> Vec<Strin
     columns
 }
 
-fn materialize_rows(rows: &[BindingRow]) -> ExecutionResult {
+fn materialize_rows(rows: &[BindingRow]) -> QueryResult {
     let columns: Vec<String> = rows
         .first()
         .map(|row| row.keys().cloned().collect())
@@ -444,10 +453,42 @@ fn materialize_rows(rows: &[BindingRow]) -> ExecutionResult {
         })
         .collect();
 
-    ExecutionResult {
+    build_query_result(columns, tuples)
+}
+
+fn build_query_result(columns: Vec<String>, rows: Vec<Vec<Value>>) -> QueryResult {
+    QueryResult {
+        graph: collect_graph(&rows),
         columns,
-        rows: tuples,
+        rows,
     }
+}
+
+fn collect_graph(rows: &[Vec<Value>]) -> GraphResult {
+    let mut nodes = Vec::new();
+    let mut edges = Vec::new();
+    let mut seen_nodes = HashSet::new();
+    let mut seen_edges = HashSet::new();
+
+    for row in rows {
+        for value in row {
+            match value {
+                Value::Node(node) => {
+                    if seen_nodes.insert(node.id) {
+                        nodes.push(node.clone());
+                    }
+                }
+                Value::Edge(edge) => {
+                    if seen_edges.insert(edge.id) {
+                        edges.push(edge.clone());
+                    }
+                }
+                Value::Scalar(_) => {}
+            }
+        }
+    }
+
+    GraphResult { nodes, edges }
 }
 
 fn require_node_binding<'a>(row: &'a BindingRow, binding: &str) -> Result<&'a Node, ExecutorError> {
@@ -808,7 +849,8 @@ mod tests {
     use crate::MIGRATOR;
 
     use super::{
-        create_edge_endpoints, execute_plan, resolve_json_path, Executor, ExecutionResult, Value,
+        build_query_result, create_edge_endpoints, execute_plan, resolve_json_path, Executor,
+        ExecutionResult, GraphResult, Value,
     };
     use crate::domain::{Edge, Node, Properties};
     use crate::repository::{EdgeRepository, NodeRepository};
@@ -828,6 +870,83 @@ mod tests {
         .expect("path should resolve");
 
         assert_eq!(resolved, JsonValue::String("Alice".to_owned()));
+    }
+
+    #[test]
+    fn query_result_graph_deduplicates_nodes_and_edges_across_rows() {
+        let alice = sample_node(
+            Uuid::from_u128(1),
+            vec!["Person"],
+            json!({"name": "Alice"}),
+        );
+        let bob = sample_node(
+            Uuid::from_u128(2),
+            vec!["Person"],
+            json!({"name": "Bob"}),
+        );
+        let edge = sample_edge(
+            Uuid::from_u128(3),
+            alice.id,
+            bob.id,
+            "KNOWS",
+            json!({"since": 2024}),
+        );
+
+        let result = build_query_result(
+            vec!["a".to_owned(), "r".to_owned(), "b".to_owned()],
+            vec![
+                vec![
+                    Value::Node(alice.clone()),
+                    Value::Edge(edge.clone()),
+                    Value::Node(bob.clone()),
+                ],
+                vec![
+                    Value::Node(alice.clone()),
+                    Value::Edge(edge.clone()),
+                    Value::Node(bob.clone()),
+                ],
+            ],
+        );
+
+        assert_eq!(
+            result.graph,
+            GraphResult {
+                nodes: vec![alice, bob],
+                edges: vec![edge],
+            }
+        );
+    }
+
+    #[test]
+    fn query_result_serializes_columns_rows_and_graph() {
+        let alice = sample_node(
+            Uuid::from_u128(11),
+            vec!["Person"],
+            json!({"name": "Alice"}),
+        );
+        let edge = sample_edge(
+            Uuid::from_u128(12),
+            alice.id,
+            Uuid::from_u128(13),
+            "KNOWS",
+            json!({}),
+        );
+
+        let result = build_query_result(
+            vec!["n".to_owned(), "r".to_owned(), "name".to_owned()],
+            vec![vec![
+                Value::Node(alice.clone()),
+                Value::Edge(edge.clone()),
+                Value::Scalar(JsonValue::String("Alice".to_owned())),
+            ]],
+        );
+
+        let json = serde_json::to_value(result).expect("query result should serialize");
+
+        assert_eq!(json["columns"], json!(["n", "r", "name"]));
+        assert_eq!(json["rows"][0][2], json!("Alice"));
+        assert_eq!(json["graph"]["nodes"][0]["id"], json!(alice.id.to_string()));
+        assert_eq!(json["graph"]["edges"][0]["id"], json!(edge.id.to_string()));
     }
 
     #[test]
@@ -882,7 +1001,11 @@ mod tests {
             result,
             ExecutionResult {
                 columns: vec!["n".to_owned()],
-                rows: vec![vec![Value::Node(alice)]],
+                rows: vec![vec![Value::Node(alice.clone())]],
+                graph: GraphResult {
+                    nodes: vec![alice],
+                    edges: Vec::new(),
+                },
             }
         );
 
@@ -918,6 +1041,8 @@ mod tests {
 
         assert_eq!(result.columns, vec!["n".to_owned(), "r".to_owned(), "m.name".to_owned()]);
         assert_eq!(result.rows.len(), 1);
+        assert_eq!(result.graph.nodes.len(), 1);
+        assert_eq!(result.graph.edges.len(), 1);
         assert!(matches!(&result.rows[0][0], Value::Node(node) if node.properties.get("name") == Some(&JsonValue::String("Alice".to_owned()))));
         assert!(matches!(&result.rows[0][1], Value::Edge(edge) if edge.type_ == "KNOWS"));
         assert_eq!(result.rows[0][2], Value::Scalar(JsonValue::String("Bob".to_owned())));
@@ -952,6 +1077,8 @@ mod tests {
 
         assert_eq!(result.columns, vec!["friend".to_owned(), "coworker".to_owned()]);
         assert_eq!(result.rows.len(), 1);
+        assert_eq!(result.graph.nodes.len(), 2);
+        assert!(result.graph.edges.is_empty());
         assert!(matches!(&result.rows[0][0], Value::Node(node) if node.properties.get("name") == Some(&JsonValue::String("Bob".to_owned()))));
         assert!(matches!(&result.rows[0][1], Value::Node(node) if node.properties.get("name") == Some(&JsonValue::String("Carol".to_owned()))));
 
@@ -981,6 +1108,8 @@ mod tests {
 
         assert_eq!(result.columns, vec!["n".to_owned()]);
         assert_eq!(result.rows.len(), 1);
+        assert_eq!(result.graph.nodes.len(), 1);
+        assert!(result.graph.edges.is_empty());
         assert!(matches!(
             &result.rows[0][0],
             Value::Node(node)
@@ -1019,6 +1148,8 @@ mod tests {
 
         assert_eq!(result.columns, vec!["a".to_owned(), "r".to_owned(), "b".to_owned()]);
         assert_eq!(result.rows.len(), 1);
+        assert_eq!(result.graph.nodes.len(), 2);
+        assert_eq!(result.graph.edges.len(), 1);
         assert!(matches!(
             &result.rows[0][0],
             Value::Node(node)
@@ -1066,6 +1197,10 @@ mod tests {
         assert_eq!(second.columns, vec!["n".to_owned()]);
         assert_eq!(first.rows.len(), 1);
         assert_eq!(second.rows.len(), 1);
+        assert_eq!(first.graph.nodes.len(), 1);
+        assert_eq!(second.graph.nodes.len(), 1);
+        assert!(first.graph.edges.is_empty());
+        assert!(second.graph.edges.is_empty());
 
         let first_node = match &first.rows[0][0] {
             Value::Node(node) => node,
