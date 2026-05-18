@@ -3,10 +3,14 @@ use std::collections::{BTreeMap, HashMap};
 use serde::{Deserialize, Serialize};
 use serde_json::{Map, Number, Value as JsonValue};
 use sqlx::PgPool;
+use uuid::Uuid;
 
 use crate::ast::{ComparisonOp, Expr, Literal, PropertyAccess, RelationshipDirection};
 use crate::domain::{Edge, Node, Properties};
-use crate::planner::{EdgeExpand, LogicalPlan, PlanStep, Projection, ProjectionItem};
+use crate::planner::{
+    CreateEdge, CreateNode, EdgeExpand, LogicalPlan, MergeNode, PlanStep, Projection,
+    ProjectionItem,
+};
 use crate::repository::{EdgeRepository, NodeRepository};
 
 const DEFAULT_SCAN_LIMIT: i64 = 1_000;
@@ -64,6 +68,18 @@ impl Executor {
             match step {
                 PlanStep::NodeScan(scan) => {
                     rows = self.execute_node_scan(scan, rows).await?;
+                    projected = None;
+                }
+                PlanStep::CreateNode(create) => {
+                    rows = self.execute_create_node(create, rows).await?;
+                    projected = None;
+                }
+                PlanStep::CreateEdge(create) => {
+                    rows = self.execute_create_edge(create, rows).await?;
+                    projected = None;
+                }
+                PlanStep::MergeNode(merge) => {
+                    rows = self.execute_merge_node(merge, rows).await?;
                     projected = None;
                 }
                 PlanStep::Expand(expand) => {
@@ -143,6 +159,117 @@ impl Executor {
 
         candidates.retain(|node| node_matches_scan(node, scan));
         Ok(candidates)
+    }
+
+    async fn execute_create_node(
+        &self,
+        create: &CreateNode,
+        input: Vec<BindingRow>,
+    ) -> Result<Vec<BindingRow>, ExecutorError> {
+        let base_rows = if input.is_empty() {
+            vec![BindingRow::new()]
+        } else {
+            input
+        };
+
+        let mut output = Vec::with_capacity(base_rows.len());
+
+        for row in base_rows {
+            let node = Node {
+                id: Uuid::new_v4(),
+                labels: create.labels.clone(),
+                properties: literals_to_properties(&create.properties)?,
+            };
+            let inserted = self
+                .nodes
+                .insert(&node)
+                .await
+                .map_err(repository_error)?;
+
+            let mut next = row;
+            next.insert(create.binding.clone(), Value::Node(inserted));
+            output.push(next);
+        }
+
+        Ok(output)
+    }
+
+    async fn execute_create_edge(
+        &self,
+        create: &CreateEdge,
+        input: Vec<BindingRow>,
+    ) -> Result<Vec<BindingRow>, ExecutorError> {
+        let mut output = Vec::with_capacity(input.len());
+
+        for row in input {
+            let from_node = require_node_binding(&row, &create.from_binding)?;
+            let to_node = require_node_binding(&row, &create.to_binding)?;
+
+            let (start_id, end_id) = create_edge_endpoints(
+                &create.direction,
+                from_node.id,
+                to_node.id,
+            );
+
+            let edge = Edge {
+                id: Uuid::new_v4(),
+                start_id,
+                end_id,
+                type_: create.edge_type.clone(),
+                properties: literals_to_properties(&create.edge_properties)?,
+            };
+            let inserted = self
+                .edges
+                .insert(&edge)
+                .await
+                .map_err(repository_error)?;
+
+            let mut next = row;
+            next.insert(create.edge_binding.clone(), Value::Edge(inserted));
+            output.push(next);
+        }
+
+        Ok(output)
+    }
+
+    async fn execute_merge_node(
+        &self,
+        merge: &MergeNode,
+        input: Vec<BindingRow>,
+    ) -> Result<Vec<BindingRow>, ExecutorError> {
+        let base_rows = if input.is_empty() {
+            vec![BindingRow::new()]
+        } else {
+            input
+        };
+
+        let mut output = Vec::with_capacity(base_rows.len());
+        let match_value = literal_to_json(&merge.value);
+
+        for row in base_rows {
+            let node = match self
+                .nodes
+                .get_by_label_and_property(&merge.label, &merge.key, match_value.clone())
+                .await
+                .map_err(repository_error)?
+            {
+                Some(existing) => existing,
+                None => {
+                    let node = Node {
+                        id: Uuid::new_v4(),
+                        labels: vec![merge.label.clone()],
+                        properties: literals_to_properties(&merge.properties)?,
+                    };
+                    self.nodes.insert(&node).await.map_err(repository_error)?
+                }
+            };
+
+            let mut next = row;
+            next.insert(merge.binding.clone(), Value::Node(node));
+            output.push(next);
+        }
+
+        Ok(output)
     }
 
     async fn execute_expand(
@@ -320,6 +447,29 @@ fn materialize_rows(rows: &[BindingRow]) -> ExecutionResult {
     ExecutionResult {
         columns,
         rows: tuples,
+    }
+}
+
+fn require_node_binding<'a>(row: &'a BindingRow, binding: &str) -> Result<&'a Node, ExecutorError> {
+    match row.get(binding) {
+        Some(Value::Node(node)) => Ok(node),
+        Some(_) => Err(ExecutorError::new(format!(
+            "binding '{binding}' is not a node"
+        ))),
+        None => Err(ExecutorError::new(format!(
+            "missing node binding '{binding}'"
+        ))),
+    }
+}
+
+fn create_edge_endpoints(
+    direction: &RelationshipDirection,
+    from_id: Uuid,
+    to_id: Uuid,
+) -> (Uuid, Uuid) {
+    match direction {
+        RelationshipDirection::Left => (to_id, from_id),
+        RelationshipDirection::Right | RelationshipDirection::Undirected => (from_id, to_id),
     }
 }
 
@@ -583,6 +733,18 @@ fn edge_to_json(edge: &Edge) -> JsonValue {
     JsonValue::Object(map)
 }
 
+fn literals_to_properties(
+    entries: &BTreeMap<String, Literal>,
+) -> Result<Properties, ExecutorError> {
+    let mut properties = Map::new();
+
+    for (key, value) in entries {
+        properties.insert(key.clone(), literal_to_json_checked(value)?);
+    }
+
+    Ok(properties)
+}
+
 fn literal_to_json(literal: &Literal) -> JsonValue {
     match literal {
         Literal::Null => JsonValue::Null,
@@ -602,6 +764,32 @@ fn literal_to_json(literal: &Literal) -> JsonValue {
     }
 }
 
+fn literal_to_json_checked(literal: &Literal) -> Result<JsonValue, ExecutorError> {
+    match literal {
+        Literal::Float(value) => Number::from_f64(*value)
+            .map(JsonValue::Number)
+            .ok_or_else(|| ExecutorError::new("float literal is not representable as JSON")),
+        Literal::Map(entries) => {
+            let mut object = Map::new();
+            for (key, value) in entries {
+                object.insert(key.clone(), literal_to_json_checked(value)?);
+            }
+            Ok(JsonValue::Object(object))
+        }
+        Literal::List(items) => {
+            let mut list = Vec::with_capacity(items.len());
+            for item in items {
+                list.push(literal_to_json_checked(item)?);
+            }
+            Ok(JsonValue::Array(list))
+        }
+        Literal::Null
+        | Literal::Boolean(_)
+        | Literal::Integer(_)
+        | Literal::String(_) => Ok(literal_to_json(literal)),
+    }
+}
+
 fn repository_error(error: sqlx::Error) -> ExecutorError {
     ExecutorError::new(format!("repository error: {error}"))
 }
@@ -614,11 +802,14 @@ mod tests {
     use sqlx::postgres::PgPoolOptions;
     use uuid::Uuid;
 
+    use crate::ast::RelationshipDirection;
     use crate::parser::parse_ast;
     use crate::planner::plan_query;
     use crate::MIGRATOR;
 
-    use super::{execute_plan, resolve_json_path, Executor, ExecutionResult, Value};
+    use super::{
+        create_edge_endpoints, execute_plan, resolve_json_path, Executor, ExecutionResult, Value,
+    };
     use crate::domain::{Edge, Node, Properties};
     use crate::repository::{EdgeRepository, NodeRepository};
 
@@ -637,6 +828,23 @@ mod tests {
         .expect("path should resolve");
 
         assert_eq!(resolved, JsonValue::String("Alice".to_owned()));
+    }
+
+    #[test]
+    fn create_edge_endpoints_follow_direction() {
+        let left = create_edge_endpoints(
+            &RelationshipDirection::Left,
+            Uuid::from_u128(1),
+            Uuid::from_u128(2),
+        );
+        let right = create_edge_endpoints(
+            &RelationshipDirection::Right,
+            Uuid::from_u128(1),
+            Uuid::from_u128(2),
+        );
+
+        assert_eq!(left, (Uuid::from_u128(2), Uuid::from_u128(1)));
+        assert_eq!(right, (Uuid::from_u128(1), Uuid::from_u128(2)));
     }
 
     #[tokio::test]
@@ -746,6 +954,133 @@ mod tests {
         assert_eq!(result.rows.len(), 1);
         assert!(matches!(&result.rows[0][0], Value::Node(node) if node.properties.get("name") == Some(&JsonValue::String("Bob".to_owned()))));
         assert!(matches!(&result.rows[0][1], Value::Node(node) if node.properties.get("name") == Some(&JsonValue::String("Carol".to_owned()))));
+
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn executes_create_node_and_returns_inserted_value() -> Result<(), sqlx::Error> {
+        let Some(pool) = test_pool().await? else {
+            return Ok(());
+        };
+        let fixture = fixture("create-node");
+
+        let plan = plan_query(
+            &parse_ast(&format!(
+                r#"CREATE (n:Person {{name: "{name}", age: 31}}) RETURN n"#,
+                name = fixture.alice
+            ))
+            .expect("query should parse"),
+        )
+        .expect("query should plan");
+
+        let result = Executor::new(pool.clone())
+            .execute(&plan)
+            .await
+            .expect("plan should execute");
+
+        assert_eq!(result.columns, vec!["n".to_owned()]);
+        assert_eq!(result.rows.len(), 1);
+        assert!(matches!(
+            &result.rows[0][0],
+            Value::Node(node)
+                if node.labels == vec!["Person".to_owned()]
+                    && node.properties.get("name") == Some(&JsonValue::String(fixture.alice.clone()))
+                    && node.properties.get("age") == Some(&JsonValue::Number(31.into()))
+        ));
+
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn executes_create_edge_pattern_and_returns_created_bindings() -> Result<(), sqlx::Error> {
+        let Some(pool) = test_pool().await? else {
+            return Ok(());
+        };
+        let fixture = fixture("create-edge");
+
+        let plan = plan_query(
+            &parse_ast(&format!(
+                r#"
+                CREATE (a:Person {{name: "{alice}"}})-[r:KNOWS {{since: 2024}}]->(b:Person {{name: "{bob}"}})
+                RETURN a, r, b
+                "#,
+                alice = fixture.alice,
+                bob = fixture.bob
+            ))
+            .expect("query should parse"),
+        )
+        .expect("query should plan");
+
+        let result = Executor::new(pool.clone())
+            .execute(&plan)
+            .await
+            .expect("plan should execute");
+
+        assert_eq!(result.columns, vec!["a".to_owned(), "r".to_owned(), "b".to_owned()]);
+        assert_eq!(result.rows.len(), 1);
+        assert!(matches!(
+            &result.rows[0][0],
+            Value::Node(node)
+                if node.properties.get("name") == Some(&JsonValue::String(fixture.alice.clone()))
+        ));
+        assert!(matches!(
+            &result.rows[0][1],
+            Value::Edge(edge)
+                if edge.type_ == "KNOWS"
+                    && edge.properties.get("since") == Some(&JsonValue::Number(2024.into()))
+        ));
+        assert!(matches!(
+            &result.rows[0][2],
+            Value::Node(node)
+                if node.properties.get("name") == Some(&JsonValue::String(fixture.bob.clone()))
+        ));
+
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn executes_merge_node_insert_and_match_paths() -> Result<(), sqlx::Error> {
+        let Some(pool) = test_pool().await? else {
+            return Ok(());
+        };
+        let fixture = fixture("merge");
+
+        let query = format!(
+            r#"MERGE (n:Person {{email: "{email}"}}) RETURN n"#,
+            email = fixture.alice
+        );
+        let plan = plan_query(&parse_ast(&query).expect("query should parse"))
+            .expect("query should plan");
+
+        let first = Executor::new(pool.clone())
+            .execute(&plan)
+            .await
+            .expect("first merge should execute");
+        let second = Executor::new(pool.clone())
+            .execute(&plan)
+            .await
+            .expect("second merge should execute");
+
+        assert_eq!(first.columns, vec!["n".to_owned()]);
+        assert_eq!(second.columns, vec!["n".to_owned()]);
+        assert_eq!(first.rows.len(), 1);
+        assert_eq!(second.rows.len(), 1);
+
+        let first_node = match &first.rows[0][0] {
+            Value::Node(node) => node,
+            other => panic!("expected node, got {other:?}"),
+        };
+        let second_node = match &second.rows[0][0] {
+            Value::Node(node) => node,
+            other => panic!("expected node, got {other:?}"),
+        };
+
+        assert_eq!(first_node.id, second_node.id);
+        assert_eq!(
+            first_node.properties.get("email"),
+            Some(&JsonValue::String(fixture.alice))
+        );
 
         Ok(())
     }
