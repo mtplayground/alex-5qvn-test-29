@@ -55,6 +55,15 @@ export function useNodeNeighborsQuery(
   })
 }
 
+export function useNodeNeighborsMutation(
+  options?: UseMutationOptions<NodeNeighborsResult, Error, string>,
+) {
+  return useMutation({
+    mutationFn: fetchNodeNeighbors,
+    ...options,
+  })
+}
+
 export function useCypherMutation(
   options?: UseMutationOptions<QueryResult, Error, CypherRequest>,
 ) {

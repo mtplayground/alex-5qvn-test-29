@@ -23,6 +23,7 @@ export type GraphCanvasProps = {
   edges: GraphEdge[]
   selectedNodeId?: string | null
   onNodeSelect?: (nodeId: string) => void
+  onNodeDoubleClick?: (nodeId: string) => void
   onCanvasClear?: () => void
   className?: string
 }
@@ -32,18 +33,22 @@ export function GraphCanvas({
   edges,
   selectedNodeId,
   onNodeSelect,
+  onNodeDoubleClick,
   onCanvasClear,
   className,
 }: GraphCanvasProps) {
   const containerRef = useRef<HTMLDivElement | null>(null)
   const cyRef = useRef<cytoscape.Core | null>(null)
   const onNodeSelectRef = useRef(onNodeSelect)
+  const onNodeDoubleClickRef = useRef(onNodeDoubleClick)
   const onCanvasClearRef = useRef(onCanvasClear)
+  const lastTapRef = useRef<{ nodeId: string; timestamp: number } | null>(null)
 
   useEffect(() => {
     onNodeSelectRef.current = onNodeSelect
+    onNodeDoubleClickRef.current = onNodeDoubleClick
     onCanvasClearRef.current = onCanvasClear
-  }, [onCanvasClear, onNodeSelect])
+  }, [onCanvasClear, onNodeDoubleClick, onNodeSelect])
 
   useEffect(() => {
     if (!containerRef.current || nodes.length === 0) {
@@ -144,11 +149,27 @@ export function GraphCanvas({
     cyRef.current = cy
 
     cy.on('tap', 'node', (event) => {
-      onNodeSelectRef.current?.(event.target.id())
+      const nodeId = event.target.id()
+      const now = Date.now()
+      const lastTap = lastTapRef.current
+
+      onNodeSelectRef.current?.(nodeId)
+
+      if (lastTap && lastTap.nodeId === nodeId && now - lastTap.timestamp < 320) {
+        lastTapRef.current = null
+        onNodeDoubleClickRef.current?.(nodeId)
+        return
+      }
+
+      lastTapRef.current = {
+        nodeId,
+        timestamp: now,
+      }
     })
 
     cy.on('tap', (event) => {
       if (event.target === cy) {
+        lastTapRef.current = null
         cy.elements().unselect()
         onCanvasClearRef.current?.()
       }
