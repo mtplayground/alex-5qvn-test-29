@@ -4,7 +4,7 @@ use sqlx::{PgPool, Row};
 use std::collections::HashSet;
 use uuid::Uuid;
 
-use crate::domain::{Edge, Node, Properties};
+use crate::domain::{Edge, LabelCount, Node, Properties, RelationshipTypeCount, SchemaCatalog};
 
 #[derive(Clone, Debug)]
 pub struct NodeRepository {
@@ -13,6 +13,11 @@ pub struct NodeRepository {
 
 #[derive(Clone, Debug)]
 pub struct EdgeRepository {
+    pool: PgPool,
+}
+
+#[derive(Clone, Debug)]
+pub struct SchemaRepository {
     pool: PgPool,
 }
 
@@ -169,6 +174,44 @@ impl EdgeRepository {
     }
 }
 
+impl SchemaRepository {
+    pub fn new(pool: PgPool) -> Self {
+        Self { pool }
+    }
+
+    pub async fn catalog(&self) -> Result<SchemaCatalog, sqlx::Error> {
+        let labels = sqlx::query_as::<_, LabelCount>(
+            r#"
+            SELECT label, COUNT(*)::BIGINT AS count
+            FROM (
+                SELECT UNNEST(labels) AS label
+                FROM nodes
+            ) expanded_labels
+            GROUP BY label
+            ORDER BY count DESC, label ASC
+            "#,
+        )
+        .fetch_all(&self.pool)
+        .await?;
+
+        let relationship_types = sqlx::query_as::<_, RelationshipTypeCount>(
+            r#"
+            SELECT type AS "type_", COUNT(*)::BIGINT AS count
+            FROM edges
+            GROUP BY type
+            ORDER BY count DESC, type ASC
+            "#,
+        )
+        .fetch_all(&self.pool)
+        .await?;
+
+        Ok(SchemaCatalog {
+            labels,
+            relationship_types,
+        })
+    }
+}
+
 fn property_filter_value(key: &str, value: Value) -> Properties {
     let mut properties = Map::with_capacity(1);
     properties.insert(key.to_owned(), value);
@@ -244,8 +287,8 @@ mod tests {
     use serde_json::{json, Value};
     use uuid::Uuid;
 
-    use super::{property_filter_value, Edge, NeighborExpansion, Node};
-    use crate::domain::Properties;
+    use super::{property_filter_value, Edge, NeighborExpansion, Node, SchemaRepository};
+    use crate::domain::{Properties, SchemaCatalog};
 
     #[test]
     fn property_filter_value_wraps_key_and_value_for_jsonb_contains() {
@@ -271,6 +314,13 @@ mod tests {
         assert_eq!(expansion.edges.len(), 1);
         assert_eq!(expansion.nodes.len(), 1);
         assert_eq!(expansion.edges[0].type_, "KNOWS");
+    }
+
+    #[test]
+    fn schema_repository_type_is_constructible() {
+        fn assert_catalog_shape(_catalog: SchemaCatalog) {}
+        let _ = assert_catalog_shape;
+        let _ = SchemaRepository::new;
     }
 
     fn sample_node(id: Uuid) -> Node {
