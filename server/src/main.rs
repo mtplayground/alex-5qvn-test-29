@@ -9,6 +9,8 @@ use axum::routing::get;
 use axum::Json;
 use axum::Router;
 use serde::Serialize;
+use sqlx::postgres::PgPoolOptions;
+use sqlx::PgPool;
 use tracing::info;
 use tracing_subscriber::EnvFilter;
 
@@ -36,6 +38,7 @@ impl AppConfig {
 #[derive(Clone, Debug)]
 struct AppState {
     config: AppConfig,
+    db_pool: PgPool,
 }
 
 #[derive(Debug)]
@@ -73,13 +76,15 @@ async fn main() -> Result<(), Box<dyn Error>> {
     init_tracing();
 
     let config = AppConfig::from_env()?;
-    let app = app_router(config.clone());
+    let db_pool = create_db_pool(&config.database_url).await?;
+    check_db_readiness(&db_pool).await?;
+    let app = app_router(config.clone(), db_pool.clone());
     let listener = tokio::net::TcpListener::bind(config.bind_addr).await?;
 
     info!(
         bind_addr = %config.bind_addr,
         seed_on_start = config.seed_on_start,
-        database_configured = !config.database_url.is_empty(),
+        database_ready = true,
         "starting server",
     );
 
@@ -88,14 +93,15 @@ async fn main() -> Result<(), Box<dyn Error>> {
     Ok(())
 }
 
-fn app_router(config: AppConfig) -> Router {
+fn app_router(config: AppConfig, db_pool: PgPool) -> Router {
     Router::new()
         .route("/healthz", get(healthz))
-        .with_state(AppState { config })
+        .with_state(AppState { config, db_pool })
 }
 
 async fn healthz(State(state): State<AppState>) -> (StatusCode, Json<HealthResponse<'static>>) {
     let _ = &state.config;
+    let _ = &state.db_pool;
     (
         StatusCode::OK,
         Json(HealthResponse { status: "ok" }),
@@ -126,4 +132,14 @@ fn parse_bool_env(value: &str) -> Result<bool, ConfigError> {
             value: value.to_owned(),
         }),
     }
+}
+
+async fn create_db_pool(database_url: &str) -> Result<PgPool, sqlx::Error> {
+    PgPoolOptions::new().connect(database_url).await
+}
+
+async fn check_db_readiness(db_pool: &PgPool) -> Result<(), sqlx::Error> {
+    sqlx::query("SELECT 1").execute(db_pool).await?;
+    info!("database readiness check passed");
+    Ok(())
 }
