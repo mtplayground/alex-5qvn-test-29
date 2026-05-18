@@ -22,8 +22,10 @@ Transit-themed graph playground with a Rust `axum` server and a Vite/React front
 - CodeMirror-based Cypher editor with keyboard submit
 - Result tabs for graph, table, and raw JSON views
 - Schema sidebar with one-click label scans
-- Interactive Cytoscape canvas for graph exploration
+- Interactive Cytoscape canvas with cose layout and stable per-label node colors
+- Query results rebuild the canvas from returned row values, not a separate aggregated graph payload
 - Node inspection and neighborhood expansion
+- Clearing the canvas selection resets the inspector counters for adjacent nodes and incident edges
 - Inline API error display with structured error details
 
 ## Backend contract
@@ -59,5 +61,7 @@ Transit-themed graph playground with a Rust `axum` server and a Vite/React front
 - The backend expects `web/dist` to exist before serving the UI
 - The default startup query is `MATCH (n:Station) RETURN n LIMIT 25` and it is executed through the same frontend query path as manual runs
 - The top-level graph node count shown in the workspace is derived from unique graph-node values in query result rows, not just the aggregated `graph.nodes` array
+- Graph rendering is driven from query rows plus node-neighbor expansion merges; non-mutation queries replace the active canvas graph
+- The graph canvas is a single long-lived Cytoscape instance that reruns layout when data changes instead of recreating the viewport
 - Release flow is frontend build first, then Rust release build
 - Production deployment expects a real `DATABASE_URL` plus durable filesystem storage at `/data`
