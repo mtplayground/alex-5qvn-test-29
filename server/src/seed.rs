@@ -385,14 +385,14 @@ fn property_filter_value(key: &str, value: Value) -> Map<String, Value> {
 
 #[cfg(test)]
 mod tests {
-    use std::path::PathBuf;
+    use std::collections::BTreeSet;
     use std::time::{SystemTime, UNIX_EPOCH};
 
-    use serde_json::json;
     use sqlx::postgres::PgPoolOptions;
     use sqlx::PgPool;
 
-    use super::{load_seed_data, load_seed_data_from_dir, SeedStatus};
+    use super::{load_seed_data, SeedStatus};
+    use crate::repository::SchemaRepository;
     use crate::MIGRATOR;
 
     #[tokio::test]
@@ -409,42 +409,49 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn loader_loads_fixture_and_records_sentinel() -> Result<(), Box<dyn std::error::Error>> {
+    async fn loader_populates_real_seed_data_from_empty_db() -> Result<(), Box<dyn std::error::Error>> {
         let Some(pool) = test_pool().await? else {
             return Ok(());
         };
-        let fixture = fixture_dir("seed-load")?;
+        assert_eq!(count_rows(&pool, "nodes").await?, 0);
+        assert_eq!(count_rows(&pool, "edges").await?, 0);
+        assert_eq!(count_rows(&pool, "seed_runs").await?, 0);
 
-        let report = load_seed_data_from_dir(&pool, &fixture).await?;
+        let report = load_seed_data(&pool, true).await?;
 
         assert_eq!(report.status, SeedStatus::Loaded);
         assert_eq!(report.datasets, 1);
-        assert_eq!(report.nodes_created, 3);
+        assert_eq!(report.nodes_created, 345);
         assert_eq!(report.nodes_matched, 0);
-        assert_eq!(report.edges_created, 2);
+        assert_eq!(report.edges_created, 625);
         assert_eq!(report.edges_matched, 0);
-        assert_eq!(count_rows(&pool, "nodes").await?, 3);
-        assert_eq!(count_rows(&pool, "edges").await?, 2);
+        assert_eq!(count_rows(&pool, "nodes").await?, 345);
+        assert_eq!(count_rows(&pool, "edges").await?, 625);
         assert_eq!(count_rows(&pool, "seed_runs").await?, 1);
 
         Ok(())
     }
 
     #[tokio::test]
-    async fn loader_rerun_skips_when_sentinel_exists() -> Result<(), Box<dyn std::error::Error>> {
+    async fn loader_rerun_keeps_counts_and_expected_schema() -> Result<(), Box<dyn std::error::Error>> {
         let Some(pool) = test_pool().await? else {
             return Ok(());
         };
-        let fixture = fixture_dir("seed-rerun")?;
-
-        let first = load_seed_data_from_dir(&pool, &fixture).await?;
-        let second = load_seed_data_from_dir(&pool, &fixture).await?;
+        let first = load_seed_data(&pool, true).await?;
+        let node_count_after_first = count_rows(&pool, "nodes").await?;
+        let edge_count_after_first = count_rows(&pool, "edges").await?;
+        let second = load_seed_data(&pool, true).await?;
+        let catalog = SchemaRepository::new(pool.clone()).catalog().await?;
 
         assert_eq!(first.status, SeedStatus::Loaded);
         assert_eq!(second.status, SeedStatus::SkippedSentinel);
-        assert_eq!(count_rows(&pool, "nodes").await?, 3);
-        assert_eq!(count_rows(&pool, "edges").await?, 2);
+        assert_eq!(node_count_after_first, 345);
+        assert_eq!(edge_count_after_first, 625);
+        assert_eq!(count_rows(&pool, "nodes").await?, node_count_after_first);
+        assert_eq!(count_rows(&pool, "edges").await?, edge_count_after_first);
         assert_eq!(count_rows(&pool, "seed_runs").await?, 1);
+        assert_eq!(label_set(&catalog), expected_labels());
+        assert_eq!(relationship_type_set(&catalog), expected_relationship_types());
 
         Ok(())
     }
@@ -495,72 +502,55 @@ mod tests {
         sqlx::query_scalar::<_, i64>(&query).fetch_one(pool).await
     }
 
-    fn fixture_dir(prefix: &str) -> Result<PathBuf, Box<dyn std::error::Error>> {
-        let nanos = SystemTime::now().duration_since(UNIX_EPOCH)?.as_nanos();
-        let dir = std::env::temp_dir().join(format!("zeroclaw-{prefix}-{nanos}"));
-        std::fs::create_dir_all(&dir)?;
-        std::fs::write(dir.join("fixture.json"), fixture_json(prefix, nanos))?;
-        Ok(dir)
+    fn label_set(catalog: &crate::domain::SchemaCatalog) -> BTreeSet<String> {
+        catalog
+            .labels
+            .iter()
+            .map(|entry| entry.label.clone())
+            .collect()
     }
 
-    fn fixture_json(prefix: &str, suffix: u128) -> String {
-        let city_slug = format!("{prefix}-city-{suffix}");
-        let country_code = format!("X{}", suffix % 90 + 10);
-        let operator_slug = format!("{prefix}-operator-{suffix}");
+    fn relationship_type_set(catalog: &crate::domain::SchemaCatalog) -> BTreeSet<String> {
+        catalog
+            .relationship_types
+            .iter()
+            .map(|entry| entry.type_.clone())
+            .collect()
+    }
 
-        json!({
-            "dataset": format!("{prefix}-{suffix}"),
-            "version": 1,
-            "nodes": [
-                {
-                    "id": "country",
-                    "labels": ["Country"],
-                    "properties": {
-                        "name": format!("Country {suffix}"),
-                        "code": country_code,
-                        "region": "Test"
-                    }
-                },
-                {
-                    "id": "city",
-                    "labels": ["City"],
-                    "properties": {
-                        "name": format!("City {suffix}"),
-                        "slug": city_slug,
-                        "population_millions": 1.2
-                    }
-                },
-                {
-                    "id": "operator",
-                    "labels": ["Operator"],
-                    "properties": {
-                        "name": format!("Operator {suffix}"),
-                        "slug": operator_slug,
-                        "mode": "metro"
-                    }
-                }
-            ],
-            "edges": [
-                {
-                    "id": "city-country",
-                    "start_id": "city",
-                    "end_id": "country",
-                    "type": "LOCATED_IN",
-                    "properties": {
-                        "kind": "administrative"
-                    }
-                },
-                {
-                    "id": "operator-city",
-                    "start_id": "operator",
-                    "end_id": "city",
-                    "type": "SERVES",
-                    "properties": {
-                        "primary": true
-                    }
-                }
-            ]
-        })
-        .to_string()
+    fn expected_labels() -> BTreeSet<String> {
+        [
+            "City",
+            "Country",
+            "Line",
+            "Manufacturer",
+            "Operator",
+            "RollingStockModel",
+            "Station",
+            "Year",
+        ]
+        .into_iter()
+        .map(str::to_owned)
+        .collect()
+    }
+
+    fn expected_relationship_types() -> BTreeSet<String> {
+        [
+            "BUILT_BY",
+            "CONNECTS_TO",
+            "HEADQUARTERED_IN",
+            "INTERCHANGE_WITH",
+            "LOCATED_IN",
+            "OPENED_IN",
+            "OPERATES",
+            "OWNED_BY",
+            "PART_OF",
+            "SERVES",
+            "TERMINUS_OF",
+            "USES_ROLLING_STOCK",
+        ]
+        .into_iter()
+        .map(str::to_owned)
+        .collect()
     }
 }
