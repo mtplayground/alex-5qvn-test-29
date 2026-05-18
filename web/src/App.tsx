@@ -75,7 +75,7 @@ function App() {
 
   function handleLabelScan(label: string) {
     setActiveLabelScan(label)
-    setSelectedNodeId(null)
+    clearCanvasSelectionState()
     setQueryText(`MATCH (n:${escapeCypherIdentifier(label)}) RETURN n LIMIT 50`)
     executeCypherQuery(`MATCH (n:${escapeCypherIdentifier(label)}) RETURN n LIMIT 50`)
   }
@@ -86,7 +86,7 @@ function App() {
     }
 
     setActiveLabelScan(null)
-    setSelectedNodeId(null)
+    clearCanvasSelectionState()
     executeCypherQuery(query)
   }
 
@@ -99,14 +99,20 @@ function App() {
         onSuccess: (result) => {
           setCanvasGraph((currentGraph) =>
             shouldMergeIntoCanvas
-              ? mergeGraphResults(currentGraph, result.graph)
-              : result.graph,
+              ? mergeGraphResults(currentGraph, graphFromResultRows(result))
+              : graphFromResultRows(result),
           )
           setResultTab('graph')
-          setSelectedNodeId(null)
+          clearCanvasSelectionState()
         },
       },
     )
+  }
+
+  function clearCanvasSelectionState() {
+    setSelectedNodeId(null)
+    setInspectedNodeId(null)
+    nodeExpandMutation.reset()
   }
 
   return (
@@ -344,8 +350,7 @@ function App() {
                   <Button
                     variant="ghost"
                     onClick={() => {
-                      setSelectedNodeId(null)
-                      nodeExpandMutation.reset()
+                      clearCanvasSelectionState()
                     }}
                   >
                     Clear
@@ -422,7 +427,7 @@ function App() {
                   selectedNodeId={inspectedNodeId}
                   onNodeSelect={setInspectedNodeId}
                   onNodeDoubleClick={handleExpandNode}
-                  onCanvasClear={() => setInspectedNodeId(null)}
+                  onCanvasClear={clearCanvasSelectionState}
                   emptyMessage={resolveGraphEmptyMessage(cypherMutation.data)}
                   className="rounded-none border-0 shadow-none"
                 />
@@ -518,14 +523,18 @@ function App() {
                 <Button
                   variant="outline"
                   className="border-white/20 bg-transparent text-white hover:bg-white/10 hover:text-white"
-                  onClick={() => setInspectedNodeId(canvasNodes[0]?.id ?? null)}
+                  onClick={() => {
+                    const firstNodeId = canvasNodes[0]?.id ?? null
+                    setSelectedNodeId(firstNodeId)
+                    setInspectedNodeId(firstNodeId)
+                  }}
                 >
                   Select first node
                 </Button>
                 <Button
                   variant="ghost"
                   className="text-white hover:bg-white/10 hover:text-white"
-                  onClick={() => setInspectedNodeId(null)}
+                  onClick={clearCanvasSelectionState}
                 >
                   Clear selection
                 </Button>
@@ -579,6 +588,26 @@ function mergeGraphResults(
   }
 }
 
+function graphFromResultRows(result: QueryResult): GraphResult {
+  const nodeMap = new Map<string, GraphNode>()
+  const edgeMap = new Map<string, GraphEdge>()
+
+  for (const row of result.rows) {
+    for (const value of row) {
+      if (isGraphNode(value)) {
+        nodeMap.set(value.id, value)
+      } else if (isGraphEdge(value)) {
+        edgeMap.set(value.id, value)
+      }
+    }
+  }
+
+  return {
+    nodes: [...nodeMap.values()],
+    edges: [...edgeMap.values()],
+  }
+}
+
 function formatJsonValue(value: unknown) {
   if (typeof value === 'string') {
     return value
@@ -602,7 +631,9 @@ function resolveGraphEmptyMessage(result: QueryResult | null | undefined) {
     return 'Run a Cypher query or select a node expansion to populate the canvas.'
   }
 
-  if (result.graph.nodes.length === 0 && result.graph.edges.length === 0) {
+  const rowGraph = graphFromResultRows(result)
+
+  if (rowGraph.nodes.length === 0 && rowGraph.edges.length === 0) {
     if (result.rows.length === 0) {
       return 'This query completed successfully but returned no graph rows.'
     }
