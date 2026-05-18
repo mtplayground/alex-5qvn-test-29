@@ -1,0 +1,74 @@
+WHITESPACE = _{ " " | "\t" | NEWLINE }
+COMMENT = _{ "//" ~ (!NEWLINE ~ ANY)* }
+
+query = { SOI ~ statement ~ EOI }
+statement = _{ match_query | create_query | merge_query }
+
+match_query = { MATCH ~ pattern_list ~ where_clause? ~ return_clause ~ limit_clause? }
+create_query = { CREATE ~ pattern_list ~ where_clause? ~ return_clause? ~ limit_clause? }
+merge_query = { MERGE ~ pattern_list ~ where_clause? ~ return_clause? ~ limit_clause? }
+
+where_clause = { WHERE ~ boolean_expr }
+return_clause = { RETURN ~ return_item ~ (comma ~ return_item)* }
+limit_clause = { LIMIT ~ integer }
+
+pattern_list = { pattern ~ (comma ~ pattern)* }
+pattern = { node_pattern ~ relationship_step? ~ relationship_step? }
+relationship_step = { relationship_pattern ~ node_pattern }
+
+node_pattern = { "(" ~ identifier? ~ node_labels? ~ property_map? ~ ")" }
+node_labels = { label ~ label* }
+label = { ":" ~ identifier }
+
+relationship_pattern = { relationship_left ~ "[" ~ relationship_detail? ~ "]" ~ relationship_right }
+relationship_left = { "<-" | "-" }
+relationship_right = { "->" | "-" }
+relationship_detail = { identifier? ~ relationship_type? ~ property_map? }
+relationship_type = { ":" ~ identifier }
+
+property_map = { "{" ~ (property_pair ~ (comma ~ property_pair)*)? ~ "}" }
+property_pair = { identifier ~ ":" ~ literal }
+
+return_item = { "*" | property_access | identifier }
+property_access = { identifier ~ ("." ~ identifier)+ }
+
+boolean_expr = { or_expr }
+or_expr = { and_expr ~ (OR ~ and_expr)* }
+and_expr = { not_expr ~ (AND ~ not_expr)* }
+not_expr = { NOT* ~ predicate }
+predicate = { comparison | "(" ~ boolean_expr ~ ")" }
+comparison = { value_expr ~ comparison_op ~ value_expr }
+comparison_op = { eq | neq | gte | lte | gt | lt }
+
+value_expr = { property_access | identifier | literal }
+literal = { null | boolean | number | string | list | property_map }
+list = { "[" ~ (literal ~ (comma ~ literal)*)? ~ "]" }
+
+identifier = @{ (ASCII_ALPHA | "_") ~ (ASCII_ALPHANUMERIC | "_")* }
+string = @{ "\"" ~ string_inner* ~ "\"" }
+string_inner = _{ "\\\"" | "\\\\" | "\\/" | "\\b" | "\\f" | "\\n" | "\\r" | "\\t" | (!"\"" ~ ANY) }
+number = @{ "-"? ~ ASCII_DIGIT+ ~ ("." ~ ASCII_DIGIT+)? }
+integer = @{ ASCII_DIGIT+ }
+boolean = { TRUE | FALSE }
+null = { NULL }
+
+comma = _{ "," }
+eq = { "=" }
+neq = { "<>" | "!=" }
+gte = { ">=" }
+lte = { "<=" }
+gt = { ">" }
+lt = { "<" }
+
+MATCH = { ^"MATCH" }
+WHERE = { ^"WHERE" }
+RETURN = { ^"RETURN" }
+LIMIT = { ^"LIMIT" }
+CREATE = { ^"CREATE" }
+MERGE = { ^"MERGE" }
+AND = { ^"AND" }
+OR = { ^"OR" }
+NOT = { ^"NOT" }
+TRUE = { ^"TRUE" }
+FALSE = { ^"FALSE" }
+NULL = { ^"NULL" }
