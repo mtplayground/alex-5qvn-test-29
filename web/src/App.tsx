@@ -1,6 +1,7 @@
 import { useEffect, useState } from 'react'
 import { Activity, DatabaseZap, Network } from 'lucide-react'
 
+import { CypherEditor } from '@/components/editor/cypher-editor'
 import { GraphCanvas } from '@/components/graph/graph-canvas'
 import { AppShell } from '@/components/layout/app-shell'
 import { Button } from '@/components/ui/button'
@@ -37,6 +38,7 @@ function App() {
   const [selectedNodeId, setSelectedNodeId] = useState<string | null>(null)
   const [inspectedNodeId, setInspectedNodeId] = useState<string | null>(null)
   const [activeLabelScan, setActiveLabelScan] = useState<string | null>(null)
+  const [queryText, setQueryText] = useState('MATCH (n) RETURN n LIMIT 25')
   const [canvasGraph, setCanvasGraph] = useState<GraphResult>({
     nodes: [],
     edges: [],
@@ -83,9 +85,18 @@ function App() {
   function handleLabelScan(label: string) {
     setActiveLabelScan(label)
     setSelectedNodeId(null)
+    setQueryText(`MATCH (n:${escapeCypherIdentifier(label)}) RETURN n LIMIT 50`)
 
     cypherMutation.mutate({
       query: `MATCH (n:${escapeCypherIdentifier(label)}) RETURN n LIMIT 50`,
+    })
+  }
+
+  function handleRunQuery(query: string) {
+    setActiveLabelScan(null)
+    setSelectedNodeId(null)
+    cypherMutation.mutate({
+      query,
     })
   }
 
@@ -182,20 +193,31 @@ function App() {
                 </p>
                 <h3 className="mt-3 text-lg font-semibold">`POST /cypher`</h3>
                 <p className="mt-3 text-sm leading-6 text-muted-foreground">
-                  One-click label scans reuse this same mutation path and result envelope.
+                  CodeMirror 6 drives the query surface with lightweight Cypher syntax
+                  highlighting. One-click label scans reuse the same mutation path.
                 </p>
-                <div className="mt-5 flex flex-wrap gap-3">
+                <div className="mt-5">
+                  <CypherEditor
+                    value={queryText}
+                    onChange={setQueryText}
+                    onRun={handleRunQuery}
+                  />
+                </div>
+                <div className="mt-4 flex flex-wrap gap-3">
                   <Button
-                    onClick={() =>
-                      {
-                        setActiveLabelScan(null)
-                        cypherMutation.mutate({
-                          query: 'MATCH (n) RETURN n LIMIT 1',
-                        })
-                      }
-                    }
+                    onClick={() => handleRunQuery(queryText)}
+                    disabled={cypherMutation.isPending}
                   >
-                    Run sample query
+                    {cypherMutation.isPending ? 'Running query…' : 'Run query'}
+                  </Button>
+                  <Button
+                    variant="outline"
+                    onClick={() => {
+                      setQueryText('MATCH (n) RETURN n LIMIT 25')
+                      handleRunQuery('MATCH (n) RETURN n LIMIT 25')
+                    }}
+                  >
+                    Load sample query
                   </Button>
                   {activeLabelScan ? (
                     <div className="inline-flex items-center rounded-full border border-primary/20 bg-primary/10 px-3 py-2 text-xs font-semibold uppercase tracking-[0.2em] text-primary">
