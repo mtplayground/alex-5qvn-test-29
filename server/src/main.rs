@@ -1,6 +1,7 @@
 use std::env;
 use std::error::Error;
 use std::fmt;
+use std::fs;
 use std::net::SocketAddr;
 use std::path::{Path as FsPath, PathBuf};
 
@@ -19,8 +20,8 @@ use server::parser::parse_ast;
 use server::planner::plan_query;
 use server::repository::{EdgeRepository, NodeRepository, SchemaRepository};
 use server::seed::{load_seed_data, SeedError, SeedReport, SeedStatus};
-use sqlx::postgres::PgPoolOptions;
-use sqlx::PgPool;
+use sqlx::sqlite::{SqliteConnectOptions, SqliteJournalMode, SqlitePoolOptions, SqliteSynchronous};
+use sqlx::SqlitePool;
 use tower_http::cors::{Any, CorsLayer};
 use tower_http::services::{ServeDir, ServeFile};
 use tower_http::trace::TraceLayer;
@@ -30,7 +31,7 @@ use tracing_subscriber::EnvFilter;
 #[derive(Clone, Debug)]
 struct AppConfig {
     bind_addr: SocketAddr,
-    database_url: String,
+    data_dir: PathBuf,
     seed_on_start: bool,
     web_dist_dir: PathBuf,
 }
@@ -38,13 +39,13 @@ struct AppConfig {
 impl AppConfig {
     fn from_env() -> Result<Self, ConfigError> {
         let bind_addr = parse_bind_addr(&read_env("BIND_ADDR")?)?;
-        let database_url = read_env("DATABASE_URL")?;
+        let data_dir = resolve_data_dir();
         let seed_on_start = parse_bool_env(&read_env("SEED_ON_START")?)?;
         let web_dist_dir = resolve_web_dist_dir()?;
 
         Ok(Self {
             bind_addr,
-            database_url,
+            data_dir,
             seed_on_start,
             web_dist_dir,
         })
@@ -54,7 +55,7 @@ impl AppConfig {
 #[derive(Clone, Debug)]
 struct AppState {
     config: AppConfig,
-    db_pool: PgPool,
+    db_pool: SqlitePool,
 }
 
 #[derive(Debug)]
@@ -191,7 +192,8 @@ async fn main() -> Result<(), Box<dyn Error>> {
     init_tracing();
 
     let config = AppConfig::from_env()?;
-    let db_pool = create_db_pool(&config.database_url).await?;
+    let db_pool = create_db_pool(&config.data_dir).await?;
+    server::MIGRATOR.run(&db_pool).await?;
     check_db_readiness(&db_pool).await?;
     let seed_report = seed_on_startup(&db_pool, config.seed_on_start).await?;
     let app = app_router(config.clone(), db_pool.clone());
@@ -199,6 +201,7 @@ async fn main() -> Result<(), Box<dyn Error>> {
 
     info!(
         bind_addr = %config.bind_addr,
+        data_dir = %config.data_dir.display(),
         seed_on_start = config.seed_on_start,
         database_ready = true,
         seed_status = ?seed_report.status,
@@ -211,7 +214,7 @@ async fn main() -> Result<(), Box<dyn Error>> {
     Ok(())
 }
 
-fn app_router(config: AppConfig, db_pool: PgPool) -> Router {
+fn app_router(config: AppConfig, db_pool: SqlitePool) -> Router {
     let web_dist_dir = config.web_dist_dir.clone();
 
     Router::new()
@@ -264,7 +267,7 @@ async fn cypher(
 }
 
 async fn execute_cypher_request(
-    db_pool: &PgPool,
+    db_pool: &SqlitePool,
     request: CypherRequest,
 ) -> Result<QueryResult, AppError> {
     let _ = &request.params;
@@ -291,7 +294,7 @@ async fn execute_cypher_request(
         })
 }
 
-async fn execute_schema_request(db_pool: &PgPool) -> Result<SchemaCatalog, AppError> {
+async fn execute_schema_request(db_pool: &SqlitePool) -> Result<SchemaCatalog, AppError> {
     SchemaRepository::new(db_pool.clone())
         .catalog()
         .await
@@ -299,7 +302,7 @@ async fn execute_schema_request(db_pool: &PgPool) -> Result<SchemaCatalog, AppEr
 }
 
 async fn execute_node_request(
-    db_pool: &PgPool,
+    db_pool: &SqlitePool,
     node_id: uuid::Uuid,
 ) -> Result<NodeNeighborsResponse, AppError> {
     let node_repository = NodeRepository::new(db_pool.clone());
@@ -349,17 +352,25 @@ fn parse_bool_env(value: &str) -> Result<bool, ConfigError> {
     }
 }
 
-async fn create_db_pool(database_url: &str) -> Result<PgPool, sqlx::Error> {
-    PgPoolOptions::new().connect(database_url).await
+async fn create_db_pool(data_dir: &FsPath) -> Result<SqlitePool, sqlx::Error> {
+    fs::create_dir_all(data_dir)?;
+    let database_path = data_dir.join("graph.db");
+    let options = SqliteConnectOptions::new()
+        .filename(database_path)
+        .create_if_missing(true)
+        .journal_mode(SqliteJournalMode::Wal)
+        .synchronous(SqliteSynchronous::Normal);
+
+    SqlitePoolOptions::new().max_connections(1).connect_with(options).await
 }
 
-async fn check_db_readiness(db_pool: &PgPool) -> Result<(), sqlx::Error> {
+async fn check_db_readiness(db_pool: &SqlitePool) -> Result<(), sqlx::Error> {
     sqlx::query("SELECT 1").execute(db_pool).await?;
     info!("database readiness check passed");
     Ok(())
 }
 
-async fn seed_on_startup(db_pool: &PgPool, seed_on_start: bool) -> Result<SeedReport, SeedError> {
+async fn seed_on_startup(db_pool: &SqlitePool, seed_on_start: bool) -> Result<SeedReport, SeedError> {
     let report = load_seed_data(db_pool, seed_on_start).await?;
     log_seed_report("startup", &report);
     Ok(report)
@@ -398,6 +409,12 @@ fn resolve_web_dist_dir() -> Result<PathBuf, ConfigError> {
     } else {
         Err(ConfigError::MissingWebDist(web_dist_dir))
     }
+}
+
+fn resolve_data_dir() -> PathBuf {
+    env::var("DATA_DIR")
+        .map(PathBuf::from)
+        .unwrap_or_else(|_| PathBuf::from("/data"))
 }
 
 fn static_assets_service(web_dist_dir: &FsPath) -> ServeDir<ServeFile> {

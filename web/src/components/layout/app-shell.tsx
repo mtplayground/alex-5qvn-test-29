@@ -58,7 +58,10 @@ export function AppShell({
             </div>
           </article>
 
-          <aside className="rounded-[2rem] border border-border/70 bg-[#16373a] p-8 text-white shadow-panel animate-fade-in">
+          <aside
+            className="rounded-[2rem] border border-border/70 bg-[#16373a] p-8 text-white shadow-panel animate-fade-in"
+            id="backend-health"
+          >
             <p className="text-xs font-semibold uppercase tracking-[0.3em] text-white/60">
               Dev routing
             </p>
@@ -101,7 +104,7 @@ export function AppShell({
             <p>Scaffolded with Vite, React, Tailwind CSS, and shadcn/ui conventions.</p>
             <a
               className="inline-flex items-center gap-2 font-medium text-primary transition-colors hover:text-primary/80"
-              href="/healthz"
+              href="#backend-health"
             >
               Check backend health
               <ArrowRight className="h-4 w-4" />

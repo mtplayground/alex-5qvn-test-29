@@ -2,7 +2,7 @@ use std::collections::{BTreeMap, HashMap, HashSet};
 
 use serde::{Deserialize, Serialize};
 use serde_json::{Map, Number, Value as JsonValue};
-use sqlx::PgPool;
+use sqlx::SqlitePool;
 use uuid::Uuid;
 
 use crate::ast::{ComparisonOp, Expr, Literal, PropertyAccess, RelationshipDirection};
@@ -57,12 +57,12 @@ pub struct Executor {
     edges: EdgeRepository,
 }
 
-pub async fn execute_plan(pool: PgPool, plan: &LogicalPlan) -> Result<QueryResult, ExecutorError> {
+pub async fn execute_plan(pool: SqlitePool, plan: &LogicalPlan) -> Result<QueryResult, ExecutorError> {
     Executor::new(pool).execute(plan).await
 }
 
 impl Executor {
-    pub fn new(pool: PgPool) -> Self {
+    pub fn new(pool: SqlitePool) -> Self {
         Self {
             nodes: NodeRepository::new(pool.clone()),
             edges: EdgeRepository::new(pool),

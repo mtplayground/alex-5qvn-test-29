@@ -1,10 +1,10 @@
 use std::env;
 use std::error::Error;
-use std::io;
+use std::path::PathBuf;
 
 use server::seed::{load_seed_data, SeedReport, SeedStatus};
 use server::MIGRATOR;
-use sqlx::postgres::PgPoolOptions;
+use sqlx::sqlite::{SqliteConnectOptions, SqliteJournalMode, SqlitePoolOptions, SqliteSynchronous};
 use tracing::info;
 use tracing_subscriber::EnvFilter;
 
@@ -13,13 +13,20 @@ async fn main() -> Result<(), Box<dyn Error>> {
     dotenvy::dotenv().ok();
     init_tracing();
 
-    let database_url = env::var("DATABASE_URL").map_err(|_| {
-        io::Error::new(
-            io::ErrorKind::NotFound,
-            "missing required environment variable `DATABASE_URL`",
+    let data_dir = env::var("DATA_DIR")
+        .map(PathBuf::from)
+        .unwrap_or_else(|_| PathBuf::from("/data"));
+    std::fs::create_dir_all(&data_dir)?;
+    let db_pool = SqlitePoolOptions::new()
+        .max_connections(1)
+        .connect_with(
+            SqliteConnectOptions::new()
+                .filename(data_dir.join("graph.db"))
+                .create_if_missing(true)
+                .journal_mode(SqliteJournalMode::Wal)
+                .synchronous(SqliteSynchronous::Normal),
         )
-    })?;
-    let db_pool = PgPoolOptions::new().connect(&database_url).await?;
+        .await?;
 
     MIGRATOR.run(&db_pool).await?;
 

@@ -1,7 +1,7 @@
 use serde::{Deserialize, Serialize};
 use serde_json::{Map, Value};
-use sqlx::postgres::PgRow;
-use sqlx::types::Json;
+use sqlx::error::BoxDynError;
+use sqlx::sqlite::SqliteRow;
 use sqlx::{FromRow, Row};
 use uuid::Uuid;
 
@@ -43,31 +43,44 @@ pub struct Edge {
     pub properties: Properties,
 }
 
-impl<'r> FromRow<'r, PgRow> for Node {
-    fn from_row(row: &'r PgRow) -> Result<Self, sqlx::Error> {
+impl<'r> FromRow<'r, SqliteRow> for Node {
+    fn from_row(row: &'r SqliteRow) -> Result<Self, sqlx::Error> {
         Ok(Self {
-            id: row.try_get("id")?,
-            labels: row.try_get("labels")?,
+            id: decode_uuid(row, "id")?,
+            labels: decode_json(row, "labels")?,
             properties: decode_properties(row, "properties")?,
         })
     }
 }
 
-impl<'r> FromRow<'r, PgRow> for Edge {
-    fn from_row(row: &'r PgRow) -> Result<Self, sqlx::Error> {
+impl<'r> FromRow<'r, SqliteRow> for Edge {
+    fn from_row(row: &'r SqliteRow) -> Result<Self, sqlx::Error> {
         Ok(Self {
-            id: row.try_get("id")?,
-            start_id: row.try_get("start_id")?,
-            end_id: row.try_get("end_id")?,
+            id: decode_uuid(row, "id")?,
+            start_id: decode_uuid(row, "start_id")?,
+            end_id: decode_uuid(row, "end_id")?,
             type_: row.try_get("type")?,
             properties: decode_properties(row, "properties")?,
         })
     }
 }
 
-fn decode_properties(row: &PgRow, column: &str) -> Result<Properties, sqlx::Error> {
-    let Json(properties) = row.try_get::<Json<Properties>, _>(column)?;
-    Ok(properties)
+fn decode_uuid(row: &SqliteRow, column: &str) -> Result<Uuid, sqlx::Error> {
+    let value: String = row.try_get(column)?;
+    Uuid::parse_str(&value).map_err(|error| sqlx::Error::Decode(Box::new(error) as BoxDynError))
+}
+
+fn decode_properties(row: &SqliteRow, column: &str) -> Result<Properties, sqlx::Error> {
+    decode_json(row, column)
+}
+
+fn decode_json<T>(row: &SqliteRow, column: &str) -> Result<T, sqlx::Error>
+where
+    T: serde::de::DeserializeOwned,
+{
+    let value: String = row.try_get(column)?;
+    serde_json::from_str(&value)
+        .map_err(|error| sqlx::Error::Decode(Box::new(error) as BoxDynError))
 }
 
 #[cfg(test)]

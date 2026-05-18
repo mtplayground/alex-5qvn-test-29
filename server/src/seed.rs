@@ -4,8 +4,7 @@ use std::path::{Path, PathBuf};
 
 use serde::Deserialize;
 use serde_json::{Map, Value};
-use sqlx::types::Json;
-use sqlx::{PgPool, Postgres, Transaction};
+use sqlx::{Sqlite, SqlitePool, Transaction};
 use uuid::Uuid;
 
 use crate::domain::{Edge, Node, Properties};
@@ -141,7 +140,7 @@ struct SeedEdgeRecord {
     properties: Properties,
 }
 
-pub async fn load_seed_data(pool: &PgPool, seed_on_start: bool) -> Result<SeedReport, SeedError> {
+pub async fn load_seed_data(pool: &SqlitePool, seed_on_start: bool) -> Result<SeedReport, SeedError> {
     if !seed_on_start {
         return Ok(SeedReport::skipped_disabled());
     }
@@ -149,7 +148,7 @@ pub async fn load_seed_data(pool: &PgPool, seed_on_start: bool) -> Result<SeedRe
     load_seed_data_from_dir(pool, &default_seed_dir()).await
 }
 
-pub async fn load_seed_data_from_dir(pool: &PgPool, seed_dir: &Path) -> Result<SeedReport, SeedError> {
+pub async fn load_seed_data_from_dir(pool: &SqlitePool, seed_dir: &Path) -> Result<SeedReport, SeedError> {
     if sentinel_exists(pool).await? {
         return Ok(SeedReport::skipped_sentinel());
     }
@@ -190,7 +189,7 @@ fn read_dataset(path: &Path) -> Result<SeedDataset, SeedError> {
     serde_json::from_str(&contents).map_err(SeedError::from)
 }
 
-async fn sentinel_exists(pool: &PgPool) -> Result<bool, SeedError> {
+async fn sentinel_exists(pool: &SqlitePool) -> Result<bool, SeedError> {
     let sentinel_exists = sqlx::query_scalar::<_, bool>("SELECT EXISTS(SELECT 1 FROM seed_runs)")
         .fetch_one(pool)
         .await?;
@@ -198,7 +197,7 @@ async fn sentinel_exists(pool: &PgPool) -> Result<bool, SeedError> {
 }
 
 async fn upsert_dataset(
-    transaction: &mut Transaction<'_, Postgres>,
+    transaction: &mut Transaction<'_, Sqlite>,
     dataset: &SeedDataset,
     report: &mut SeedReport,
 ) -> Result<(), SeedError> {
@@ -217,7 +216,7 @@ async fn upsert_dataset(
 }
 
 async fn upsert_node(
-    transaction: &mut Transaction<'_, Postgres>,
+    transaction: &mut Transaction<'_, Sqlite>,
     node: &SeedNodeRecord,
     report: &mut SeedReport,
 ) -> Result<Uuid, SeedError> {
@@ -237,16 +236,19 @@ async fn upsert_node(
         r#"
         SELECT id, labels, properties
         FROM nodes
-        WHERE labels @> ARRAY[$1]::TEXT[]
-          AND properties @> $2
         ORDER BY created_at ASC, id ASC
-        LIMIT 1
         "#,
     )
-    .bind(label)
-    .bind(Json(property_filter))
-    .fetch_optional(transaction.as_mut())
+    .fetch_all(transaction.as_mut())
     .await?;
+
+    let existing = existing.into_iter().find(|node| {
+        node.labels.iter().any(|node_label| node_label == label)
+            && node
+                .properties
+                .iter()
+                .any(|(key, value)| property_filter.get(key).is_some_and(|expected| expected == value))
+    });
 
     if let Some(node) = existing {
         report.nodes_matched += 1;
@@ -259,13 +261,13 @@ async fn upsert_node(
     let inserted = sqlx::query_as::<_, Node>(
         r#"
         INSERT INTO nodes (id, labels, properties)
-        VALUES ($1, $2, $3)
+        VALUES (?1, ?2, ?3)
         RETURNING id, labels, properties
         "#,
     )
-    .bind(Uuid::new_v4())
-    .bind(&node.labels)
-    .bind(Json(properties))
+    .bind(Uuid::new_v4().to_string())
+    .bind(serde_json::to_string(&node.labels).unwrap())
+    .bind(serde_json::to_string(&properties).unwrap())
     .fetch_one(transaction.as_mut())
     .await?;
 
@@ -274,7 +276,7 @@ async fn upsert_node(
 }
 
 async fn upsert_edge(
-    transaction: &mut Transaction<'_, Postgres>,
+    transaction: &mut Transaction<'_, Sqlite>,
     edge: &SeedEdgeRecord,
     node_id_map: &std::collections::HashMap<String, Uuid>,
     report: &mut SeedReport,
@@ -290,15 +292,15 @@ async fn upsert_edge(
         r#"
         SELECT id, start_id, end_id, type, properties
         FROM edges
-        WHERE start_id = $1
-          AND end_id = $2
-          AND type = $3
+        WHERE start_id = ?1
+          AND end_id = ?2
+          AND type = ?3
         ORDER BY id ASC
         LIMIT 1
         "#,
     )
-    .bind(start_id)
-    .bind(end_id)
+    .bind(start_id.to_string())
+    .bind(end_id.to_string())
     .bind(&edge.type_)
     .fetch_optional(transaction.as_mut())
     .await?;
@@ -314,15 +316,15 @@ async fn upsert_edge(
     sqlx::query_as::<_, Edge>(
         r#"
         INSERT INTO edges (id, start_id, end_id, type, properties)
-        VALUES ($1, $2, $3, $4, $5)
+        VALUES (?1, ?2, ?3, ?4, ?5)
         RETURNING id, start_id, end_id, type, properties
         "#,
     )
-    .bind(Uuid::new_v4())
-    .bind(start_id)
-    .bind(end_id)
+    .bind(Uuid::new_v4().to_string())
+    .bind(start_id.to_string())
+    .bind(end_id.to_string())
     .bind(&edge.type_)
-    .bind(Json(properties))
+    .bind(serde_json::to_string(&properties).unwrap())
     .fetch_one(transaction.as_mut())
     .await?;
 
@@ -331,7 +333,7 @@ async fn upsert_edge(
 }
 
 async fn insert_seed_run(
-    transaction: &mut Transaction<'_, Postgres>,
+    transaction: &mut Transaction<'_, Sqlite>,
     dataset: &SeedDataset,
 ) -> Result<(), SeedError> {
     let node_count = i32::try_from(dataset.nodes.len()).map_err(|_| {
@@ -344,7 +346,7 @@ async fn insert_seed_run(
     sqlx::query(
         r#"
         INSERT INTO seed_runs (dataset, version, node_count, edge_count)
-        VALUES ($1, $2, $3, $4)
+        VALUES (?1, ?2, ?3, ?4)
         "#,
     )
     .bind(&dataset.dataset)

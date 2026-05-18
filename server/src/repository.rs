@@ -1,6 +1,6 @@
 use serde_json::{Map, Value};
-use sqlx::types::Json;
-use sqlx::{Executor, PgPool, Postgres, Row};
+use sqlx::sqlite::SqliteRow;
+use sqlx::{Executor, Row, Sqlite, SqlitePool};
 use std::collections::HashSet;
 use uuid::Uuid;
 
@@ -8,17 +8,17 @@ use crate::domain::{Edge, LabelCount, Node, Properties, RelationshipTypeCount, S
 
 #[derive(Clone, Debug)]
 pub struct NodeRepository {
-    pool: PgPool,
+    pool: SqlitePool,
 }
 
 #[derive(Clone, Debug)]
 pub struct EdgeRepository {
-    pool: PgPool,
+    pool: SqlitePool,
 }
 
 #[derive(Clone, Debug)]
 pub struct SchemaRepository {
-    pool: PgPool,
+    pool: SqlitePool,
 }
 
 #[derive(Clone, Debug, PartialEq)]
@@ -28,7 +28,7 @@ pub struct NeighborExpansion {
 }
 
 impl NodeRepository {
-    pub fn new(pool: PgPool) -> Self {
+    pub fn new(pool: SqlitePool) -> Self {
         Self { pool }
     }
 
@@ -68,7 +68,7 @@ impl NodeRepository {
 }
 
 impl EdgeRepository {
-    pub fn new(pool: PgPool) -> Self {
+    pub fn new(pool: SqlitePool) -> Self {
         Self { pool }
     }
 
@@ -102,7 +102,7 @@ impl EdgeRepository {
 }
 
 impl SchemaRepository {
-    pub fn new(pool: PgPool) -> Self {
+    pub fn new(pool: SqlitePool) -> Self {
         Self { pool }
     }
 
@@ -114,32 +114,32 @@ impl SchemaRepository {
 
 async fn insert_node<'e, E>(executor: E, node: &Node) -> Result<Node, sqlx::Error>
 where
-    E: Executor<'e, Database = Postgres>,
+    E: Executor<'e, Database = Sqlite>,
 {
     sqlx::query_as::<_, Node>(
             r#"
             INSERT INTO nodes (id, labels, properties)
-            VALUES ($1, $2, $3)
+            VALUES (?1, ?2, ?3)
             RETURNING id, labels, properties
             "#,
         )
-        .bind(node.id)
-        .bind(&node.labels)
-        .bind(Json(&node.properties))
+        .bind(node.id.to_string())
+        .bind(serde_json::to_string(&node.labels).unwrap())
+        .bind(serde_json::to_string(&node.properties).unwrap())
         .fetch_one(executor)
         .await
 }
 
 async fn scan_nodes<'e, E>(executor: E, limit: i64) -> Result<Vec<Node>, sqlx::Error>
 where
-    E: Executor<'e, Database = Postgres>,
+    E: Executor<'e, Database = Sqlite>,
 {
     sqlx::query_as::<_, Node>(
         r#"
         SELECT id, labels, properties
         FROM nodes
         ORDER BY created_at ASC, id ASC
-        LIMIT $1
+        LIMIT ?1
         "#,
     )
     .bind(limit)
@@ -149,16 +149,16 @@ where
 
 async fn get_node_by_id<'e, E>(executor: E, node_id: Uuid) -> Result<Option<Node>, sqlx::Error>
 where
-    E: Executor<'e, Database = Postgres>,
+    E: Executor<'e, Database = Sqlite>,
 {
     sqlx::query_as::<_, Node>(
         r#"
         SELECT id, labels, properties
         FROM nodes
-        WHERE id = $1
+        WHERE id = ?1
         "#,
     )
-    .bind(node_id)
+    .bind(node_id.to_string())
     .fetch_optional(executor)
     .await
 }
@@ -169,21 +169,12 @@ async fn scan_nodes_by_label<'e, E>(
     limit: i64,
 ) -> Result<Vec<Node>, sqlx::Error>
 where
-    E: Executor<'e, Database = Postgres>,
+    E: Executor<'e, Database = Sqlite>,
 {
-    sqlx::query_as::<_, Node>(
-        r#"
-        SELECT id, labels, properties
-        FROM nodes
-        WHERE labels @> ARRAY[$1]::TEXT[]
-        ORDER BY created_at ASC, id ASC
-        LIMIT $2
-        "#,
-    )
-    .bind(label)
-    .bind(limit)
-    .fetch_all(executor)
-    .await
+    let mut nodes = scan_nodes(executor, i64::MAX).await?;
+    nodes.retain(|node| node.labels.iter().any(|node_label| node_label == label));
+    nodes.truncate(limit.try_into().unwrap_or(usize::MAX));
+    Ok(nodes)
 }
 
 async fn get_node_by_label_and_property<'e, E>(
@@ -193,24 +184,14 @@ async fn get_node_by_label_and_property<'e, E>(
     value: Value,
 ) -> Result<Option<Node>, sqlx::Error>
 where
-    E: Executor<'e, Database = Postgres>,
+    E: Executor<'e, Database = Sqlite>,
 {
     let property_filter = property_filter_value(key, value);
-
-    sqlx::query_as::<_, Node>(
-        r#"
-        SELECT id, labels, properties
-        FROM nodes
-        WHERE labels @> ARRAY[$1]::TEXT[]
-          AND properties @> $2
-        ORDER BY created_at ASC, id ASC
-        LIMIT 1
-        "#,
-    )
-    .bind(label)
-    .bind(Json(property_filter))
-    .fetch_optional(executor)
-    .await
+    let nodes = scan_nodes(executor, i64::MAX).await?;
+    Ok(nodes.into_iter().find(|node| {
+        node.labels.iter().any(|node_label| node_label == label)
+            && properties_contain(&node.properties, &property_filter)
+    }))
 }
 
 async fn filter_nodes_by_property<'e, E>(
@@ -220,41 +201,31 @@ async fn filter_nodes_by_property<'e, E>(
     limit: i64,
 ) -> Result<Vec<Node>, sqlx::Error>
 where
-    E: Executor<'e, Database = Postgres>,
+    E: Executor<'e, Database = Sqlite>,
 {
     let property_filter = property_filter_value(key, value);
-
-    sqlx::query_as::<_, Node>(
-        r#"
-        SELECT id, labels, properties
-        FROM nodes
-        WHERE properties @> $1
-        ORDER BY created_at ASC, id ASC
-        LIMIT $2
-        "#,
-    )
-    .bind(Json(property_filter))
-    .bind(limit)
-    .fetch_all(executor)
-    .await
+    let mut nodes = scan_nodes(executor, i64::MAX).await?;
+    nodes.retain(|node| properties_contain(&node.properties, &property_filter));
+    nodes.truncate(limit.try_into().unwrap_or(usize::MAX));
+    Ok(nodes)
 }
 
 async fn insert_edge<'e, E>(executor: E, edge: &Edge) -> Result<Edge, sqlx::Error>
 where
-    E: Executor<'e, Database = Postgres>,
+    E: Executor<'e, Database = Sqlite>,
 {
     sqlx::query_as::<_, Edge>(
             r#"
             INSERT INTO edges (id, start_id, end_id, type, properties)
-            VALUES ($1, $2, $3, $4, $5)
+            VALUES (?1, ?2, ?3, ?4, ?5)
             RETURNING id, start_id, end_id, type, properties
             "#,
         )
-        .bind(edge.id)
-        .bind(edge.start_id)
-        .bind(edge.end_id)
+        .bind(edge.id.to_string())
+        .bind(edge.start_id.to_string())
+        .bind(edge.end_id.to_string())
         .bind(&edge.type_)
-        .bind(Json(&edge.properties))
+        .bind(serde_json::to_string(&edge.properties).unwrap())
         .fetch_one(executor)
         .await
 }
@@ -265,7 +236,7 @@ async fn expand_neighbors_query<'e, E>(
     edge_type: Option<&str>,
 ) -> Result<NeighborExpansion, sqlx::Error>
 where
-    E: Executor<'e, Database = Postgres>,
+    E: Executor<'e, Database = Sqlite>,
 {
     let rows = sqlx::query(
         r#"
@@ -281,15 +252,15 @@ where
         FROM edges e
         JOIN nodes n
           ON n.id = CASE
-                WHEN e.start_id = $1 THEN e.end_id
+                WHEN e.start_id = ?1 THEN e.end_id
                 ELSE e.start_id
             END
-        WHERE (e.start_id = $1 OR e.end_id = $1)
-          AND ($2::TEXT IS NULL OR e.type = $2)
+        WHERE (e.start_id = ?1 OR e.end_id = ?1)
+          AND (?2 IS NULL OR e.type = ?2)
         ORDER BY e.id ASC, n.id ASC
         "#,
     )
-    .bind(node_id)
+    .bind(node_id.to_string())
     .bind(edge_type)
     .fetch_all(executor)
     .await?;
@@ -297,26 +268,33 @@ where
     build_neighbor_expansion(rows)
 }
 
-async fn catalog_query(
-    executor: &mut sqlx::PgConnection,
-) -> Result<SchemaCatalog, sqlx::Error> {
-    let labels = sqlx::query_as::<_, LabelCount>(
+async fn catalog_query(executor: &mut sqlx::SqliteConnection) -> Result<SchemaCatalog, sqlx::Error> {
+    let all_nodes = sqlx::query_as::<_, Node>(
         r#"
-        SELECT label, COUNT(*)::BIGINT AS count
-        FROM (
-            SELECT UNNEST(labels) AS label
-            FROM nodes
-        ) expanded_labels
-        GROUP BY label
-        ORDER BY count DESC, label ASC
+        SELECT id, labels, properties
+        FROM nodes
+        ORDER BY created_at ASC, id ASC
         "#,
     )
     .fetch_all(&mut *executor)
     .await?;
 
+    let mut label_counts = std::collections::BTreeMap::<String, i64>::new();
+    for node in all_nodes {
+        for label in node.labels {
+            *label_counts.entry(label).or_insert(0) += 1;
+        }
+    }
+
+    let mut labels = label_counts
+        .into_iter()
+        .map(|(label, count)| LabelCount { label, count })
+        .collect::<Vec<_>>();
+    labels.sort_by(|left, right| right.count.cmp(&left.count).then_with(|| left.label.cmp(&right.label)));
+
     let relationship_types = sqlx::query_as::<_, RelationshipTypeCount>(
         r#"
-        SELECT type AS "type_", COUNT(*)::BIGINT AS count
+        SELECT type AS type_, COUNT(*) AS count
         FROM edges
         GROUP BY type
         ORDER BY count DESC, type ASC
@@ -344,26 +322,26 @@ async fn list_edges_by_endpoint<'e, E>(
     edge_type: Option<&str>,
 ) -> Result<Vec<Edge>, sqlx::Error>
 where
-    E: Executor<'e, Database = Postgres>,
+    E: Executor<'e, Database = Sqlite>,
 {
     let query = format!(
         r#"
         SELECT id, start_id, end_id, type, properties
         FROM edges
-        WHERE {endpoint_column} = $1
-          AND ($2::TEXT IS NULL OR type = $2)
+        WHERE {endpoint_column} = ?1
+          AND (?2 IS NULL OR type = ?2)
         ORDER BY id ASC
         "#
     );
 
     sqlx::query_as::<_, Edge>(&query)
-        .bind(node_id)
+        .bind(node_id.to_string())
         .bind(edge_type)
         .fetch_all(executor)
         .await
 }
 
-fn build_neighbor_expansion(rows: Vec<sqlx::postgres::PgRow>) -> Result<NeighborExpansion, sqlx::Error> {
+fn build_neighbor_expansion(rows: Vec<SqliteRow>) -> Result<NeighborExpansion, sqlx::Error> {
     let mut edges = Vec::with_capacity(rows.len());
     let mut nodes = Vec::with_capacity(rows.len());
     let mut seen_edge_ids = HashSet::with_capacity(rows.len());
@@ -384,7 +362,7 @@ fn build_neighbor_expansion(rows: Vec<sqlx::postgres::PgRow>) -> Result<Neighbor
 
         let node = Node {
             id: row.try_get("node_id")?,
-            labels: row.try_get("node_labels")?,
+            labels: serde_json::from_str(&row.try_get::<String, _>("node_labels")?).unwrap_or_default(),
             properties: decode_json_properties(&row, "node_properties")?,
         };
 
@@ -396,12 +374,15 @@ fn build_neighbor_expansion(rows: Vec<sqlx::postgres::PgRow>) -> Result<Neighbor
     Ok(NeighborExpansion { edges, nodes })
 }
 
-fn decode_json_properties(
-    row: &sqlx::postgres::PgRow,
-    column: &str,
-) -> Result<Properties, sqlx::Error> {
-    let Json(properties) = row.try_get::<Json<Properties>, _>(column)?;
-    Ok(properties)
+fn decode_json_properties(row: &SqliteRow, column: &str) -> Result<Properties, sqlx::Error> {
+    let value: String = row.try_get(column)?;
+    Ok(serde_json::from_str(&value).unwrap_or_default())
+}
+
+fn properties_contain(properties: &Properties, filter: &Properties) -> bool {
+    filter
+        .iter()
+        .all(|(key, expected)| properties.get(key).is_some_and(|actual| actual == expected))
 }
 
 #[cfg(test)]
