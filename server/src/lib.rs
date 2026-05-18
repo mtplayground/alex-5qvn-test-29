@@ -4,5 +4,6 @@ pub mod executor;
 pub mod parser;
 pub mod planner;
 pub mod repository;
+pub mod seed;
 
 pub static MIGRATOR: sqlx::migrate::Migrator = sqlx::migrate!("../migrations");
