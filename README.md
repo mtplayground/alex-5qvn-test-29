@@ -18,8 +18,24 @@ Copy `.env.example` into your local environment management flow and provide a va
 
 ## Build
 
-This repository currently initializes a Rust workspace with a single `server` crate:
+This repository currently contains a Rust server crate and a Vite frontend.
 
 ```bash
 cargo build
 ```
+
+## Local frontend + server flow
+
+For a production-style local run where the Rust binary serves the frontend bundle:
+
+```bash
+cd web
+npm install
+npm run build
+
+cd ..
+export DATABASE_URL=$(cat /workspace/.database_url)
+cargo run --release
+```
+
+The server serves `web/dist/` at `/`, including client-side route fallback to `index.html`.
