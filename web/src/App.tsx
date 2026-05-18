@@ -20,7 +20,7 @@ import type {
 } from '@/lib/api-types'
 import { isGraphEdge, isGraphNode } from '@/lib/api-types'
 
-const INITIAL_GRAPH_QUERY = 'MATCH (n) RETURN n LIMIT 25'
+const INITIAL_GRAPH_QUERY = 'MATCH (n:Station) RETURN n LIMIT 25'
 
 function App() {
   const [selectedNodeId, setSelectedNodeId] = useState<string | null>(null)
@@ -38,6 +38,7 @@ function App() {
   const cypherMutation = useCypherMutation()
   const canvasNodes = canvasGraph.nodes
   const canvasEdges = canvasGraph.edges
+  const resultNodeCount = countUniqueGraphNodes(cypherMutation.data)
   const inspectedNode =
     canvasNodes.find((node) => node.id === inspectedNodeId) ?? null
 
@@ -274,7 +275,7 @@ function App() {
                   <p>
                     Graph nodes:{' '}
                     <span className="font-medium text-foreground">
-                      {cypherMutation.data?.graph.nodes.length ?? 0}
+                      {resultNodeCount}
                     </span>
                   </p>
                   {cypherMutation.data?.rows[0]?.[0] &&
@@ -581,6 +582,24 @@ function resolveGraphEmptyMessage(result: QueryResult | null | undefined) {
   }
 
   return 'Run a Cypher query or select a node expansion to populate the canvas.'
+}
+
+function countUniqueGraphNodes(result: QueryResult | null | undefined) {
+  if (!result) {
+    return 0
+  }
+
+  const nodeIds = new Set<string>()
+
+  for (const row of result.rows) {
+    for (const value of row) {
+      if (isGraphNode(value)) {
+        nodeIds.add(value.id)
+      }
+    }
+  }
+
+  return nodeIds.size
 }
 
 function ResultTable({ result }: { result: QueryResult | null }) {
