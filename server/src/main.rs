@@ -11,9 +11,11 @@ use axum::Json;
 use axum::Router;
 use serde::{Deserialize, Serialize};
 use serde_json::Value as JsonValue;
+use server::domain::SchemaCatalog;
 use server::executor::QueryResult;
 use server::parser::parse_ast;
 use server::planner::plan_query;
+use server::repository::SchemaRepository;
 use sqlx::postgres::PgPoolOptions;
 use sqlx::PgPool;
 use tower_http::services::{ServeDir, ServeFile};
@@ -129,6 +131,7 @@ fn app_router(config: AppConfig, db_pool: PgPool) -> Router {
 
     Router::new()
         .route("/healthz", get(healthz))
+        .route("/schema", get(schema))
         .route("/cypher", post(cypher))
         .fallback_service(static_assets_service(&web_dist_dir))
         .with_state(AppState { config, db_pool })
@@ -141,6 +144,12 @@ async fn healthz(State(state): State<AppState>) -> (StatusCode, Json<HealthRespo
         StatusCode::OK,
         Json(HealthResponse { status: "ok" }),
     )
+}
+
+async fn schema(
+    State(state): State<AppState>,
+) -> Result<Json<SchemaCatalog>, (StatusCode, Json<ErrorResponse>)> {
+    execute_schema_request(&state.db_pool).await.map(Json)
 }
 
 async fn cypher(
@@ -187,6 +196,24 @@ async fn execute_cypher_request(
                 StatusCode::BAD_REQUEST,
                 Json(ErrorResponse {
                     error: error.message,
+                    line: None,
+                    col: None,
+                }),
+            )
+        })
+}
+
+async fn execute_schema_request(
+    db_pool: &PgPool,
+) -> Result<SchemaCatalog, (StatusCode, Json<ErrorResponse>)> {
+    SchemaRepository::new(db_pool.clone())
+        .catalog()
+        .await
+        .map_err(|error| {
+            (
+                StatusCode::BAD_REQUEST,
+                Json(ErrorResponse {
+                    error: format!("repository error: {error}"),
                     line: None,
                     col: None,
                 }),
@@ -253,7 +280,7 @@ fn static_assets_service(web_dist_dir: &Path) -> ServeDir<ServeFile> {
 mod tests {
     use std::time::{SystemTime, UNIX_EPOCH};
 
-    use super::{execute_cypher_request, CypherRequest};
+    use super::{execute_cypher_request, execute_schema_request, CypherRequest};
     use axum::http::StatusCode;
     use serde_json::json;
     use serde_json::Value as JsonValue;
@@ -261,7 +288,7 @@ mod tests {
     use sqlx::PgPool;
     use uuid::Uuid;
 
-    use server::domain::{Edge, Node, Properties};
+    use server::domain::{Edge, Node, Properties, SchemaCatalog};
     use server::repository::{EdgeRepository, NodeRepository};
     use server::MIGRATOR;
 
@@ -342,6 +369,49 @@ mod tests {
         assert!(error.1 .0.error.contains("MERGE"));
         assert_eq!(error.1 .0.line, None);
         assert_eq!(error.1 .0.col, None);
+
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn schema_request_returns_empty_catalog() -> Result<(), sqlx::Error> {
+        let Some(pool) = test_pool().await? else {
+            return Ok(());
+        };
+
+        let result = execute_schema_request(&pool)
+            .await
+            .expect("schema request should succeed");
+
+        assert_eq!(
+            result,
+            SchemaCatalog {
+                labels: Vec::new(),
+                relationship_types: Vec::new(),
+            }
+        );
+
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn schema_request_returns_catalog_counts() -> Result<(), sqlx::Error> {
+        let Some(pool) = test_pool().await? else {
+            return Ok(());
+        };
+        let fixture = fixture("schema");
+        seed_graph(&pool, &fixture).await?;
+
+        let result = execute_schema_request(&pool)
+            .await
+            .expect("schema request should succeed");
+
+        assert_eq!(result.labels.len(), 1);
+        assert_eq!(result.labels[0].label, "Person");
+        assert_eq!(result.labels[0].count, 2);
+        assert_eq!(result.relationship_types.len(), 1);
+        assert_eq!(result.relationship_types[0].type_, "KNOWS");
+        assert_eq!(result.relationship_types[0].count, 1);
 
         Ok(())
     }
