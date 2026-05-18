@@ -2,20 +2,20 @@ use std::env;
 use std::error::Error;
 use std::fmt;
 use std::net::SocketAddr;
-use std::path::{Path, PathBuf};
+use std::path::{Path as FsPath, PathBuf};
 
-use axum::extract::State;
+use axum::extract::{Path, State};
 use axum::http::StatusCode;
 use axum::routing::{get, post};
 use axum::Json;
 use axum::Router;
 use serde::{Deserialize, Serialize};
 use serde_json::Value as JsonValue;
-use server::domain::SchemaCatalog;
+use server::domain::{Edge, Node, SchemaCatalog};
 use server::executor::QueryResult;
 use server::parser::parse_ast;
 use server::planner::plan_query;
-use server::repository::SchemaRepository;
+use server::repository::{EdgeRepository, NodeRepository, SchemaRepository};
 use sqlx::postgres::PgPoolOptions;
 use sqlx::PgPool;
 use tower_http::services::{ServeDir, ServeFile};
@@ -102,6 +102,13 @@ struct ErrorResponse {
     col: Option<usize>,
 }
 
+#[derive(Debug, Serialize, Deserialize, PartialEq)]
+struct NodeNeighborsResponse {
+    node: Node,
+    edges: Vec<Edge>,
+    nodes: Vec<Node>,
+}
+
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn Error>> {
     dotenvy::dotenv().ok();
@@ -132,6 +139,7 @@ fn app_router(config: AppConfig, db_pool: PgPool) -> Router {
     Router::new()
         .route("/healthz", get(healthz))
         .route("/schema", get(schema))
+        .route("/node/:id", get(node_details))
         .route("/cypher", post(cypher))
         .fallback_service(static_assets_service(&web_dist_dir))
         .with_state(AppState { config, db_pool })
@@ -150,6 +158,13 @@ async fn schema(
     State(state): State<AppState>,
 ) -> Result<Json<SchemaCatalog>, (StatusCode, Json<ErrorResponse>)> {
     execute_schema_request(&state.db_pool).await.map(Json)
+}
+
+async fn node_details(
+    State(state): State<AppState>,
+    Path(node_id): Path<uuid::Uuid>,
+) -> Result<Json<NodeNeighborsResponse>, (StatusCode, Json<ErrorResponse>)> {
+    execute_node_request(&state.db_pool, node_id).await.map(Json)
 }
 
 async fn cypher(
@@ -221,6 +236,58 @@ async fn execute_schema_request(
         })
 }
 
+async fn execute_node_request(
+    db_pool: &PgPool,
+    node_id: uuid::Uuid,
+) -> Result<NodeNeighborsResponse, (StatusCode, Json<ErrorResponse>)> {
+    let node_repository = NodeRepository::new(db_pool.clone());
+    let edge_repository = EdgeRepository::new(db_pool.clone());
+
+    let node = node_repository
+        .get_by_id(node_id)
+        .await
+        .map_err(|error| {
+            (
+                StatusCode::BAD_REQUEST,
+                Json(ErrorResponse {
+                    error: format!("repository error: {error}"),
+                    line: None,
+                    col: None,
+                }),
+            )
+        })?
+        .ok_or_else(|| {
+            (
+                StatusCode::NOT_FOUND,
+                Json(ErrorResponse {
+                    error: format!("node not found: {node_id}"),
+                    line: None,
+                    col: None,
+                }),
+            )
+        })?;
+
+    let neighbors = edge_repository
+        .expand_neighbors(node_id, None)
+        .await
+        .map_err(|error| {
+            (
+                StatusCode::BAD_REQUEST,
+                Json(ErrorResponse {
+                    error: format!("repository error: {error}"),
+                    line: None,
+                    col: None,
+                }),
+            )
+        })?;
+
+    Ok(NodeNeighborsResponse {
+        node,
+        edges: neighbors.edges,
+        nodes: neighbors.nodes,
+    })
+}
+
 fn init_tracing() {
     let filter = EnvFilter::try_from_default_env()
         .unwrap_or_else(|_| EnvFilter::new("info,server=debug"));
@@ -258,7 +325,7 @@ async fn check_db_readiness(db_pool: &PgPool) -> Result<(), sqlx::Error> {
 }
 
 fn resolve_web_dist_dir() -> Result<PathBuf, ConfigError> {
-    let repo_root = Path::new(env!("CARGO_MANIFEST_DIR"))
+    let repo_root = FsPath::new(env!("CARGO_MANIFEST_DIR"))
         .parent()
         .ok_or_else(|| ConfigError::MissingWebDist(PathBuf::from("web/dist")))?;
     let web_dist_dir = repo_root.join("web").join("dist");
@@ -270,7 +337,7 @@ fn resolve_web_dist_dir() -> Result<PathBuf, ConfigError> {
     }
 }
 
-fn static_assets_service(web_dist_dir: &Path) -> ServeDir<ServeFile> {
+fn static_assets_service(web_dist_dir: &FsPath) -> ServeDir<ServeFile> {
     let index_file = web_dist_dir.join("index.html");
 
     ServeDir::new(web_dist_dir).fallback(ServeFile::new(index_file))
@@ -280,7 +347,10 @@ fn static_assets_service(web_dist_dir: &Path) -> ServeDir<ServeFile> {
 mod tests {
     use std::time::{SystemTime, UNIX_EPOCH};
 
-    use super::{execute_cypher_request, execute_schema_request, CypherRequest};
+    use super::{
+        execute_cypher_request, execute_node_request, execute_schema_request, CypherRequest,
+        NodeNeighborsResponse,
+    };
     use axum::http::StatusCode;
     use serde_json::json;
     use serde_json::Value as JsonValue;
@@ -322,7 +392,7 @@ mod tests {
             return Ok(());
         };
         let fixture = fixture("cypher");
-        seed_graph(&pool, &fixture).await?;
+        let _ = seed_graph(&pool, &fixture).await?;
 
         let result = execute_cypher_request(
             &pool,
@@ -400,7 +470,7 @@ mod tests {
             return Ok(());
         };
         let fixture = fixture("schema");
-        seed_graph(&pool, &fixture).await?;
+        let _ = seed_graph(&pool, &fixture).await?;
 
         let result = execute_schema_request(&pool)
             .await
@@ -412,6 +482,55 @@ mod tests {
         assert_eq!(result.relationship_types.len(), 1);
         assert_eq!(result.relationship_types[0].type_, "KNOWS");
         assert_eq!(result.relationship_types[0].count, 1);
+
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn node_request_returns_center_node_and_neighbors() -> Result<(), sqlx::Error> {
+        let Some(pool) = test_pool().await? else {
+            return Ok(());
+        };
+        let fixture = fixture("node");
+        let (alice, bob, edge_id) = seed_graph(&pool, &fixture).await?;
+
+        let result = execute_node_request(&pool, alice.id)
+            .await
+            .expect("node request should succeed");
+
+        assert_eq!(
+            result,
+            NodeNeighborsResponse {
+                node: alice,
+                edges: vec![sample_edge(
+                    edge_id,
+                    Uuid::from_u128(fixture.base + 1),
+                    Uuid::from_u128(fixture.base + 2),
+                    "KNOWS",
+                    json!({"since": 2020}),
+                )],
+                nodes: vec![bob],
+            }
+        );
+
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn node_request_returns_not_found_error() -> Result<(), sqlx::Error> {
+        let Some(pool) = test_pool().await? else {
+            return Ok(());
+        };
+
+        let missing = Uuid::from_u128(999_999);
+        let error = execute_node_request(&pool, missing)
+            .await
+            .expect_err("node request should fail");
+
+        assert_eq!(error.0, StatusCode::NOT_FOUND);
+        assert!(error.1 .0.error.contains("node not found"));
+        assert_eq!(error.1 .0.line, None);
+        assert_eq!(error.1 .0.col, None);
 
         Ok(())
     }
@@ -442,7 +561,7 @@ mod tests {
         Ok(Some(pool))
     }
 
-    async fn seed_graph(pool: &PgPool, fixture: &Fixture) -> Result<(), sqlx::Error> {
+    async fn seed_graph(pool: &PgPool, fixture: &Fixture) -> Result<(Node, Node, Uuid), sqlx::Error> {
         let node_repository = NodeRepository::new(pool.clone());
         let edge_repository = EdgeRepository::new(pool.clone());
 
@@ -459,9 +578,10 @@ mod tests {
 
         node_repository.insert(&alice).await?;
         node_repository.insert(&bob).await?;
+        let edge_id = Uuid::from_u128(fixture.base + 11);
         edge_repository
             .insert(&sample_edge(
-                Uuid::from_u128(fixture.base + 11),
+                edge_id,
                 alice.id,
                 bob.id,
                 "KNOWS",
@@ -469,7 +589,7 @@ mod tests {
             ))
             .await?;
 
-        Ok(())
+        Ok((alice, bob, edge_id))
     }
 
     fn sample_node(id: Uuid, labels: Vec<&str>, properties: JsonValue) -> Node {
