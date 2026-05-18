@@ -1,21 +1,24 @@
 Architecture plan
 
 Project shape
-- `server/` is the Rust backend that parses Cypher, executes plans, and returns `QueryResult` payloads.
-- `web/` is the Vite + React frontend. `web/src/App.tsx` is the main workspace screen and currently owns the sample query constant plus top-level result summary rendering.
-- Frontend transport and shared payload types live under `web/src/lib/`, especially `api-client.ts`, `api-hooks.ts`, and `api-types.ts`.
+- `web/src/components/graph/graph-canvas.tsx` owns Cytoscape integration, node/edge styling, interaction hooks, and the debug node-position feed used by Playwright.
+- `web/src/App.tsx` owns the workspace state: current query text, `canvasGraph`, selected / inspected node ids, label-scan state, tab state, and the transforms that map API results into the canvas.
+- `web/src/lib/api-types.ts` is the shared frontend contract for `GraphNode`, `GraphEdge`, `GraphResult`, `QueryResult`, and the graph-value type guards used when rebuilding canvas data from result rows.
+- `web/tests/smoke.spec.ts` is the end-to-end contract for the intended canvas behavior and will be updated last so it validates the first two issues together.
 
-Module/file organization
-- Keep the issue localized to the frontend unless the investigation shows the API result shape is wrong.
-- The sample query constant is owned by `web/src/App.tsx`; update it there so the initial auto-load and the "Load sample query" action stay in sync.
-- Unique node counting should be computed from `QueryResult.rows` using the existing `QueryValue` graph-node discriminators from `web/src/lib/api-types.ts`, ideally as a small helper colocated in `App.tsx` unless reuse becomes obvious.
-- Preserve the backend `QueryResult.graph` contract; this issue sounds like a presentation/counting bug rather than an API-shape change.
+Module / file plan
+- Issue #83 should stay centered in `graph-canvas.tsx`: keep one long-lived Cytoscape core in a ref, update its elements when props change, and preserve the existing selection / debug hooks while moving layout + per-label coloring into data-driven Cytoscape state.
+- Issue #84 should stay centered in `App.tsx` with small helpers: derive the visible canvas graph from `QueryResult.rows`, reset selection counters when the graph is cleared, and keep node-expansion merge behavior compatible with the new canvas graph shape from issue #83.
+- Issue #85 should only touch `web/tests/smoke.spec.ts` unless a tiny test-only affordance is needed from `graph-canvas.tsx` debug output.
 
-Issue dependency view
-- Only issue #81 is in scope for this batch: fix the sample query constant and compute the unique node count from result rows.
-- The issue depends on existing query execution and graph result rendering already present in the repo; no prerequisite issue work is required.
+Issue dependencies
+- #83 is the foundation. It defines the single-instance Cytoscape behavior and the `data.label` / color behavior that later tests will assert against.
+- #84 depends on #83 because the rebuilt canvas graph has to target the new Cytoscape element update path rather than recreating multiple canvas assumptions.
+- #85 depends on both #83 and #84 because the smoke flow needs the final graph rendering behavior, label-scan result shaping, and clear-selection reset semantics.
 
 Key design decisions
-- Use one source of truth for the sample query so startup behavior and the explicit sample-query button cannot drift.
-- Compute displayed node counts from the returned rows, deduplicated by node id, rather than trusting a broader graph aggregate if the UI is supposed to reflect the tabular query result.
-- Prefer a narrow frontend-only edit over changing executor output unless inspection during implementation proves the backend is the real source of the mismatch.
+- Treat `App.tsx` state as the source of truth and `GraphCanvas` as a renderer / interaction adapter around Cytoscape.
+- Keep shared graph-shape logic in small frontend helpers rather than changing the backend contract; the issues describe presentation and client-state behavior, not API schema changes.
+- Preserve the existing `graph-node-positions` debug output so Playwright can continue to assert rendered graph state without introducing new browser-only test APIs.
+- Use deterministic per-label coloring from node labels, not per-node ids, so relation-query tests can verify multiple visible label colors from mixed-label results.
+- When clearing the canvas or replacing it from a label scan, reset derived selection state in the same state transition so counts and inspector UI cannot drift from the visible graph.
