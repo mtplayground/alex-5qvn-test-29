@@ -1,8 +1,10 @@
 target/
 node_modules/
+.env.production
 .gh_token
 .claude/
 .database_url
+.db_decision
 .task_id
 .container_name
 .app_name
