@@ -1,0 +1,54 @@
+@import url('https://fonts.googleapis.com/css2?family=IBM+Plex+Sans:wght@400;500;600;700&display=swap');
+
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+@layer base {
+  :root {
+    --background: 48 33% 96%;
+    --foreground: 210 24% 13%;
+    --card: 0 0% 100%;
+    --card-foreground: 210 24% 13%;
+    --popover: 0 0% 100%;
+    --popover-foreground: 210 24% 13%;
+    --primary: 197 79% 34%;
+    --primary-foreground: 48 33% 97%;
+    --secondary: 149 18% 89%;
+    --secondary-foreground: 178 58% 17%;
+    --muted: 48 22% 90%;
+    --muted-foreground: 210 15% 35%;
+    --accent: 17 70% 56%;
+    --accent-foreground: 0 0% 100%;
+    --destructive: 0 72% 51%;
+    --destructive-foreground: 0 0% 98%;
+    --border: 170 12% 80%;
+    --input: 170 12% 80%;
+    --ring: 197 79% 34%;
+    --radius: 1rem;
+  }
+
+  * {
+    @apply border-border;
+  }
+
+  html {
+    @apply scroll-smooth;
+  }
+
+  body {
+    @apply min-h-screen bg-background font-sans text-foreground antialiased;
+    background-image:
+      radial-gradient(circle at top, hsl(149 41% 84% / 0.7), transparent 28rem),
+      linear-gradient(135deg, hsl(48 33% 98%), hsl(48 27% 92%));
+    margin: 0;
+  }
+
+  #root {
+    @apply min-h-screen;
+  }
+
+  code {
+    @apply rounded bg-muted px-1.5 py-0.5 text-sm;
+  }
+}
