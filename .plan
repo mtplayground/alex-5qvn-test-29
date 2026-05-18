@@ -1,62 +1,21 @@
-# ZeroClaw Architecture Plan
+Architecture plan
 
-## Repository structure
+Project shape
+- Rust `axum` server in `server/` serves the JSON API and the built SPA from `web/dist`.
+- React + Vite frontend in `web/` owns the user workspace. `web/src/App.tsx` is the main mounted surface and `web/src/components/layout/app-shell.tsx` owns the landing/header shell.
+- Shared frontend data contracts already live in `web/src/lib/api-types.ts` and hooks in `web/src/lib/api-hooks.ts`.
 
-Use a Rust workspace as the system spine and keep the React app in a dedicated frontend package:
+Module/file organization
+- Keep backend routes unchanged unless the issue exposes a missing API shape.
+- For issue #79, primary changes should stay in `web/src/App.tsx`, routing/bootstrap entrypoints such as `web/src/main.tsx` if needed, and existing graph/query hooks rather than creating a parallel state model.
+- Reuse existing `GraphResult`, schema hooks, node-expansion hooks, and Cypher mutation plumbing to load the initial graph.
 
-- `Cargo.toml`: workspace root
-- `crates/server`: Axum HTTP server, config, middleware, route wiring, static file serving, startup hooks
-- `crates/domain`: shared domain types such as `Node`, `Edge`, schema summaries, query/result envelopes, error primitives
-- `crates/store`: sqlx pool setup, migrations integration, repository traits and Postgres implementations
-- `crates/query`: Cypher subset parser, AST, logical plan, executor, write semantics
-- `crates/seed`: seed file models, loader, and `seed` binary
-- `frontend`: Vite + React + Tailwind + shadcn/ui app, API client, graph canvas, query editor, schema/sidebar UX
-- `migrations`: sqlx migrations owned by the store layer
-- `seeds`: JSON or TOML seed data files
-- `tests` or per-crate integration test directories: API, repository, and end-to-end coverage
+Issue dependency view
+- Only one planned issue exists: #79 Mount Cytoscape workspace as default route and auto-load initial graph.
+- It depends on already-present backend endpoints and the current Cytoscape/query workspace, so no prerequisite issue work is needed.
 
-This split keeps core graph semantics independent from transport and persistence, while letting the server compose the other crates without circular dependencies.
-
-## Shared types and boundaries
-
-- `domain` owns serializable graph primitives and API-facing DTOs.
-- `store` depends on `domain` for persisted entities and repository return types.
-- `query` depends on `domain` plus repository traits from `store` or a small shared repository interface module.
-- `server` depends on `domain`, `store`, `query`, and `seed`.
-- `frontend` consumes only HTTP contracts, not Rust internals.
-
-Prefer repository traits for query execution so parser/planner/executor tests can run against in-memory doubles before Postgres-backed integration coverage.
-
-## Key design decisions
-
-- Database model: start with normalized `nodes` and `edges` tables, storing labels and properties in JSONB with GIN indexes added later if needed. This keeps the MVP flexible enough for label scans, neighbor expansion, and property filters without over-designing early.
-- IDs: use UUIDs for nodes and edges at the persistence/domain layer; expose them as strings in JSON.
-- Query engine scope: implement a narrow Cypher subset intentionally, with AST and logical plan types that can grow without rewriting endpoint contracts.
-- Result envelope: one stable response shape for graph rows, tabular rows, stats, and raw JSON support so the frontend can power Graph/Table/Raw tabs from one API contract.
-- Static delivery: compile frontend separately and embed or serve built assets from the Rust binary in a way that works for both local dev and release builds.
-- Seeds: keep seeds idempotent by using stable IDs or natural-key merge rules so startup hooks and the standalone `seed` binary can share one loader path.
-
-## Issue dependency map
-
-1. Foundation
-   Issues `#1-#7` establish workspace structure, server boot, database access, migrations, frontend scaffold, asset serving, and core graph types.
-2. Persistence
-   Issues `#8-#11` build repositories and Postgres integration tests on top of the database foundation.
-3. Query engine
-   Issues `#12-#18` add parser, AST, planner, executor, mutation support, result serialization, and focused tests. These depend on domain types and repository abstractions.
-4. API surface
-   Issues `#19-#23` expose query/schema/node endpoints, error handling, middleware, and route integration tests. These depend on the server, repositories, and executor.
-5. Data bootstrap
-   Issues `#24-#27` add seed assets, loader, startup integration, and tests. These depend on migrations and repository/write support.
-6. Frontend application
-   Issues `#28-#36` layer API client, graph canvas, inspector, expansion, schema browsing, editor, query execution, result tabs, and mutation refresh on the scaffold from `#5` and backend APIs from `#19-#21`.
-7. Final hardening
-   Issues `#37-#39` add Playwright smoke coverage, edge-case cleanup, and project docs/release scripting after the main flows are stable.
-
-## Recommended implementation order notes
-
-- Complete `#1-#4` before deep frontend work; the API and data model shape should settle first.
-- Define `domain` contracts in `#7` before repository and query-engine issues to avoid churn.
-- Introduce repository traits early so `query` and `server` can be tested without a live database where appropriate.
-- Keep the `/cypher` response contract stable by the end of `#17`; frontend issues `#28` and `#34-#36` should build against that versioned shape.
-- Leave performance tuning and extra indexes until `#38` unless a prior issue is blocked by query latency.
+Key design decisions
+- Treat the Cytoscape workspace as the default user entrypoint rather than a separate secondary route.
+- Auto-load the initial graph through the same frontend query path already used by manual Cypher execution so initial state and user-triggered state stay consistent.
+- Keep the initial graph query conservative and deterministic, likely matching the existing default query text, to avoid introducing a second source of truth.
+- Prefer a small bootstrap effect over a larger router refactor unless the existing entrypoint clearly requires routing changes.
