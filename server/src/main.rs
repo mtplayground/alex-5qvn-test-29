@@ -371,13 +371,11 @@ mod tests {
     use std::time::{SystemTime, UNIX_EPOCH};
 
     use super::{
-        app_router, execute_cypher_request, execute_node_request, execute_schema_request,
-        AppConfig, CypherRequest, ErrorResponse, NodeNeighborsResponse,
+        app_router, AppConfig, ErrorResponse, NodeNeighborsResponse,
     };
     use axum::body::{to_bytes, Body};
     use axum::http::StatusCode;
     use axum::http::{Method, Request};
-    use axum::response::IntoResponse;
     use serde_json::json;
     use serde_json::Value as JsonValue;
     use sqlx::postgres::PgPoolOptions;
@@ -386,26 +384,108 @@ mod tests {
     use uuid::Uuid;
 
     use server::domain::{Edge, Node, Properties, SchemaCatalog};
+    use server::executor::QueryResult;
     use server::repository::{EdgeRepository, NodeRepository};
     use server::MIGRATOR;
 
     #[tokio::test]
-    async fn cypher_request_returns_parse_error_shape() -> Result<(), sqlx::Error> {
+    async fn cypher_route_executes_read_query() -> Result<(), sqlx::Error> {
         let Some(pool) = test_pool().await? else {
             return Ok(());
         };
+        let fixture = fixture("cypher-read");
+        let _ = seed_graph(&pool, &fixture).await?;
+        let response = request(
+            test_app(pool),
+            Method::POST,
+            "/cypher",
+            Some(json!({
+                "query": format!(
+                    r#"
+                    MATCH (n:Person {{name: "{name}"}})-[r:KNOWS]->(m:Person)
+                    RETURN n, r, m.name
+                    LIMIT 10
+                "#,
+                    name = fixture.alice
+                )
+            })),
+        )
+        .await;
 
-        let error = execute_cypher_request(
-            &pool,
-            CypherRequest {
-                query: r#"MATCH (n) WHERE n.name = "Alice""#.to_owned(),
-                params: None,
-            },
+        let status = response.status();
+        let payload: QueryResult = response_json(response).await;
+
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(payload.columns, vec!["n", "r", "m.name"]);
+        assert_eq!(payload.rows.len(), 1);
+        assert_eq!(payload.graph.nodes.len(), 1);
+        assert_eq!(payload.graph.edges.len(), 1);
+
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn cypher_route_executes_write_query() -> Result<(), sqlx::Error> {
+        let Some(pool) = test_pool().await? else {
+            return Ok(());
+        };
+        let fixture = fixture("cypher-write");
+        let response = request(
+            test_app(pool.clone()),
+            Method::POST,
+            "/cypher",
+            Some(json!({
+                "query": format!(
+                    r#"
+                    CREATE (n:Person {{name: "{name}", age: 28}})
+                    RETURN n
+                "#,
+                    name = fixture.alice
+                )
+            })),
         )
         .await
-        .expect_err("request should fail");
+        ;
 
-        let response = error.into_response();
+        let status = response.status();
+        let payload: QueryResult = response_json(response).await;
+
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(payload.columns, vec!["n"]);
+        assert_eq!(payload.rows.len(), 1);
+        assert_eq!(payload.graph.nodes.len(), 1);
+        assert_eq!(payload.graph.edges.len(), 0);
+
+        let persisted = NodeRepository::new(pool)
+            .scan_by_label("Person", 10)
+            .await?
+            .into_iter()
+            .find(|node| {
+                node.properties
+                    .get("name")
+                    .and_then(JsonValue::as_str)
+                    .is_some_and(|name| name == fixture.alice)
+            });
+        assert!(persisted.is_some());
+
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn cypher_route_returns_parse_error_shape() -> Result<(), sqlx::Error> {
+        let Some(pool) = test_pool().await? else {
+            return Ok(());
+        };
+        let response = request(
+            test_app(pool),
+            Method::POST,
+            "/cypher",
+            Some(json!({
+                "query": r#"MATCH (n) WHERE n.name = "Alice""#
+            })),
+        )
+        .await;
+
         let status = response.status();
         let payload: ErrorResponse = response_json(response).await;
 
@@ -418,123 +498,52 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn cypher_request_executes_and_returns_query_result() -> Result<(), sqlx::Error> {
+    async fn schema_route_returns_catalog_counts() -> Result<(), sqlx::Error> {
         let Some(pool) = test_pool().await? else {
             return Ok(());
         };
-        let fixture = fixture("cypher");
+        let fixture = fixture("schema-route");
         let _ = seed_graph(&pool, &fixture).await?;
+        let response = request(test_app(pool), Method::GET, "/schema", None).await;
 
-        let result = execute_cypher_request(
-            &pool,
-            CypherRequest {
-                query: format!(
-                    r#"
-                    MATCH (n:Person {{name: "{name}"}})-[r:KNOWS]->(m:Person)
-                    RETURN n, r, m.name
-                    LIMIT 10
-                "#,
-                    name = fixture.alice
-                ),
-                params: Some(json!({"ignored": true})),
-            },
-        )
-        .await
-        .expect("request should succeed");
-
-        assert_eq!(result.columns, vec!["n", "r", "m.name"]);
-        assert_eq!(result.rows.len(), 1);
-        assert_eq!(result.graph.nodes.len(), 1);
-        assert_eq!(result.graph.edges.len(), 1);
-
-        Ok(())
-    }
-
-    #[tokio::test]
-    async fn cypher_request_returns_execution_error_shape() -> Result<(), sqlx::Error> {
-        let Some(pool) = test_pool().await? else {
-            return Ok(());
-        };
-
-        let error = execute_cypher_request(
-            &pool,
-            CypherRequest {
-                query: r#"MERGE (n:Person {email: "a", id: 1}) RETURN n"#.to_owned(),
-                params: None,
-            },
-        )
-        .await
-        .expect_err("request should fail");
-
-        let response = error.into_response();
         let status = response.status();
-        let payload: ErrorResponse = response_json(response).await;
+        let payload: SchemaCatalog = response_json(response).await;
 
-        assert_eq!(status, StatusCode::BAD_REQUEST);
-        assert!(payload.error.contains("MERGE"));
-        assert_eq!(payload.line, None);
-        assert_eq!(payload.col, None);
-
-        Ok(())
-    }
-
-    #[tokio::test]
-    async fn schema_request_returns_empty_catalog() -> Result<(), sqlx::Error> {
-        let Some(pool) = test_pool().await? else {
-            return Ok(());
-        };
-
-        let result = execute_schema_request(&pool)
-            .await
-            .expect("schema request should succeed");
-
-        assert_eq!(
-            result,
-            SchemaCatalog {
-                labels: Vec::new(),
-                relationship_types: Vec::new(),
-            }
-        );
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(payload.labels.len(), 1);
+        assert_eq!(payload.labels[0].label, "Person");
+        assert_eq!(payload.labels[0].count, 2);
+        assert_eq!(payload.relationship_types.len(), 1);
+        assert_eq!(payload.relationship_types[0].type_, "KNOWS");
+        assert_eq!(payload.relationship_types[0].count, 1);
 
         Ok(())
     }
 
     #[tokio::test]
-    async fn schema_request_returns_catalog_counts() -> Result<(), sqlx::Error> {
+    async fn node_route_returns_center_node_and_neighbors() -> Result<(), sqlx::Error> {
         let Some(pool) = test_pool().await? else {
             return Ok(());
         };
-        let fixture = fixture("schema");
-        let _ = seed_graph(&pool, &fixture).await?;
-
-        let result = execute_schema_request(&pool)
-            .await
-            .expect("schema request should succeed");
-
-        assert_eq!(result.labels.len(), 1);
-        assert_eq!(result.labels[0].label, "Person");
-        assert_eq!(result.labels[0].count, 2);
-        assert_eq!(result.relationship_types.len(), 1);
-        assert_eq!(result.relationship_types[0].type_, "KNOWS");
-        assert_eq!(result.relationship_types[0].count, 1);
-
-        Ok(())
-    }
-
-    #[tokio::test]
-    async fn node_request_returns_center_node_and_neighbors() -> Result<(), sqlx::Error> {
-        let Some(pool) = test_pool().await? else {
-            return Ok(());
-        };
-        let fixture = fixture("node");
+        let fixture = fixture("node-route");
         let (alice, bob, edge_id) = seed_graph(&pool, &fixture).await?;
+        let response = request(
+            test_app(pool),
+            Method::GET,
+            &format!("/node/{}", alice.id),
+            None,
+        )
+        .await;
 
-        let result = execute_node_request(&pool, alice.id)
-            .await
-            .expect("node request should succeed");
+        let status = response.status();
+        let payload: NodeNeighborsResponse = response_json(response).await;
 
         assert_eq!(
-            result,
+            status,
+            StatusCode::OK
+        );
+        assert_eq!(
+            payload,
             NodeNeighborsResponse {
                 node: alice,
                 edges: vec![sample_edge(
@@ -552,22 +561,48 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn node_request_returns_not_found_error() -> Result<(), sqlx::Error> {
+    async fn node_route_returns_not_found_error() -> Result<(), sqlx::Error> {
         let Some(pool) = test_pool().await? else {
             return Ok(());
         };
-
-        let missing = Uuid::from_u128(999_999);
-        let error = execute_node_request(&pool, missing)
-            .await
-            .expect_err("node request should fail");
-
-        let response = error.into_response();
+        let response = request(
+            test_app(pool),
+            Method::GET,
+            &format!("/node/{}", Uuid::from_u128(999_999)),
+            None,
+        )
+        .await;
         let status = response.status();
         let payload: ErrorResponse = response_json(response).await;
 
         assert_eq!(status, StatusCode::NOT_FOUND);
         assert!(payload.error.contains("node not found"));
+        assert_eq!(payload.line, None);
+        assert_eq!(payload.col, None);
+
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn cypher_route_returns_execution_error_shape() -> Result<(), sqlx::Error> {
+        let Some(pool) = test_pool().await? else {
+            return Ok(());
+        };
+        let response = request(
+            test_app(pool),
+            Method::POST,
+            "/cypher",
+            Some(json!({
+                "query": r#"MERGE (n:Person {email: "a", id: 1}) RETURN n"#
+            })),
+        )
+        .await;
+
+        let status = response.status();
+        let payload: ErrorResponse = response_json(response).await;
+
+        assert_eq!(status, StatusCode::BAD_REQUEST);
+        assert!(payload.error.contains("MERGE"));
         assert_eq!(payload.line, None);
         assert_eq!(payload.col, None);
 
@@ -649,6 +684,32 @@ mod tests {
             .await
             .expect("body should be readable");
         serde_json::from_slice(&body).expect("body should contain valid JSON")
+    }
+
+    async fn request(
+        app: axum::Router,
+        method: Method,
+        uri: &str,
+        body: Option<JsonValue>,
+    ) -> axum::response::Response {
+        let mut builder = Request::builder().method(method).uri(uri);
+
+        if body.is_some() {
+            builder = builder.header("content-type", "application/json");
+        }
+
+        app.oneshot(
+            builder
+                .body(match body {
+                    Some(value) => Body::from(
+                        serde_json::to_vec(&value).expect("request JSON should serialize"),
+                    ),
+                    None => Body::empty(),
+                })
+                .expect("request should build"),
+        )
+        .await
+        .expect("request should complete")
     }
 
     fn test_app(pool: PgPool) -> axum::Router {
