@@ -146,6 +146,10 @@ impl AppError {
     fn not_found(error: impl Into<String>) -> Self {
         Self::new(StatusCode::NOT_FOUND, error)
     }
+
+    fn internal_server_error(error: impl Into<String>) -> Self {
+        Self::new(StatusCode::INTERNAL_SERVER_ERROR, error)
+    }
 }
 
 impl IntoResponse for AppError {
@@ -278,14 +282,20 @@ async fn execute_cypher_request(
 
     server::executor::execute_plan(db_pool.clone(), &plan)
         .await
-        .map_err(|error| AppError::bad_request(error.message))
+        .map_err(|error| {
+            if error.message.starts_with("repository error:") {
+                AppError::internal_server_error(error.message)
+            } else {
+                AppError::bad_request(error.message)
+            }
+        })
 }
 
 async fn execute_schema_request(db_pool: &PgPool) -> Result<SchemaCatalog, AppError> {
     SchemaRepository::new(db_pool.clone())
         .catalog()
         .await
-        .map_err(|error| AppError::bad_request(format!("repository error: {error}")))
+        .map_err(|error| AppError::internal_server_error(format!("repository error: {error}")))
 }
 
 async fn execute_node_request(
@@ -298,13 +308,13 @@ async fn execute_node_request(
     let node = node_repository
         .get_by_id(node_id)
         .await
-        .map_err(|error| AppError::bad_request(format!("repository error: {error}")))?
+        .map_err(|error| AppError::internal_server_error(format!("repository error: {error}")))?
         .ok_or_else(|| AppError::not_found(format!("node not found: {node_id}")))?;
 
     let neighbors = edge_repository
         .expand_neighbors(node_id, None)
         .await
-        .map_err(|error| AppError::bad_request(format!("repository error: {error}")))?;
+        .map_err(|error| AppError::internal_server_error(format!("repository error: {error}")))?;
 
     Ok(NodeNeighborsResponse {
         node,
@@ -398,6 +408,7 @@ fn static_assets_service(web_dist_dir: &FsPath) -> ServeDir<ServeFile> {
 
 #[cfg(test)]
 mod tests {
+    use std::time::Duration;
     use std::path::PathBuf;
     use std::time::{SystemTime, UNIX_EPOCH};
 
@@ -642,6 +653,92 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn cypher_route_returns_empty_result_cleanly() -> Result<(), sqlx::Error> {
+        let Some(pool) = test_pool().await? else {
+            return Ok(());
+        };
+        let response = request(
+            test_app(pool),
+            Method::POST,
+            "/cypher",
+            Some(json!({
+                "query": r#"MATCH (n:MissingLabel) RETURN n LIMIT 10"#
+            })),
+        )
+        .await;
+
+        let status = response.status();
+        let payload: QueryResult = response_json(response).await;
+
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(payload.columns, vec!["n"]);
+        assert!(payload.rows.is_empty());
+        assert!(payload.graph.nodes.is_empty());
+        assert!(payload.graph.edges.is_empty());
+
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn schema_route_returns_json_for_database_failures() -> Result<(), sqlx::Error> {
+        let response = request(test_app(broken_pool()), Method::GET, "/schema", None).await;
+
+        let status = response.status();
+        let payload: ErrorResponse = response_json(response).await;
+
+        assert_eq!(status, StatusCode::INTERNAL_SERVER_ERROR);
+        assert!(payload.error.contains("repository error:"));
+        assert_eq!(payload.line, None);
+        assert_eq!(payload.col, None);
+
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn node_route_returns_json_for_database_failures() -> Result<(), sqlx::Error> {
+        let response = request(
+            test_app(broken_pool()),
+            Method::GET,
+            &format!("/node/{}", Uuid::from_u128(1)),
+            None,
+        )
+        .await;
+
+        let status = response.status();
+        let payload: ErrorResponse = response_json(response).await;
+
+        assert_eq!(status, StatusCode::INTERNAL_SERVER_ERROR);
+        assert!(payload.error.contains("repository error:"));
+        assert_eq!(payload.line, None);
+        assert_eq!(payload.col, None);
+
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn cypher_route_returns_json_for_database_failures() -> Result<(), sqlx::Error> {
+        let response = request(
+            test_app(broken_pool()),
+            Method::POST,
+            "/cypher",
+            Some(json!({
+                "query": r#"MATCH (n:Station) RETURN n LIMIT 1"#
+            })),
+        )
+        .await;
+
+        let status = response.status();
+        let payload: ErrorResponse = response_json(response).await;
+
+        assert_eq!(status, StatusCode::INTERNAL_SERVER_ERROR);
+        assert!(payload.error.contains("repository error:"));
+        assert_eq!(payload.line, None);
+        assert_eq!(payload.col, None);
+
+        Ok(())
+    }
+
+    #[tokio::test]
     async fn app_router_returns_json_error_for_invalid_request_body() -> Result<(), sqlx::Error> {
         let Some(pool) = test_pool().await? else {
             return Ok(());
@@ -769,6 +866,13 @@ mod tests {
             seed_on_start: false,
             web_dist_dir: PathBuf::from("/workspace/web/dist"),
         }
+    }
+
+    fn broken_pool() -> PgPool {
+        PgPoolOptions::new()
+            .acquire_timeout(Duration::from_millis(50))
+            .connect_lazy("postgresql://postgres@127.0.0.1:9/graph_playground_broken")
+            .expect("broken pool URL should parse")
     }
 
     async fn test_pool() -> Result<Option<PgPool>, sqlx::Error> {
