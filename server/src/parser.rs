@@ -583,11 +583,13 @@ fn decode_string(raw: &str, span: Span<'_>) -> Result<String, ParserError> {
 
 #[cfg(test)]
 mod tests {
+    use pest::Parser;
+
     use crate::ast::{
         Clause, ComparisonOp, Expr, Literal, Pattern, Query, RelationshipDirection, ReturnItem,
     };
 
-    use super::{parse_ast, parse_query};
+    use super::{parse_ast, parse_query, CypherParser, Rule};
 
     #[test]
     fn parses_match_where_return_limit_with_two_hops() {
@@ -600,6 +602,84 @@ mod tests {
 
         let pairs = parse_query(query).expect("query should parse");
         assert_eq!(pairs.as_str().trim(), query.trim());
+    }
+
+    #[test]
+    fn parses_create_and_merge_statements() {
+        let create = r#"CREATE (a:Person {name: "Alice"})-[:KNOWS]->(b:Person) RETURN a, b"#;
+        let merge = r#"MERGE (n:Person {email: "alice@example.com"}) RETURN n"#;
+
+        assert!(parse_query(create).is_ok());
+        assert!(parse_query(merge).is_ok());
+    }
+
+    #[test]
+    fn parses_property_map_rule() {
+        let property_map = r#"{name: "Alice", age: 30, active: true}"#;
+        let pairs = CypherParser::parse(Rule::property_map, property_map)
+            .expect("property map should parse");
+
+        assert_eq!(pairs.as_str(), property_map);
+    }
+
+    #[test]
+    fn parses_all_literal_kinds() {
+        for literal in [
+            r#""Alice""#,
+            "42",
+            "-3.14",
+            "true",
+            "false",
+            "null",
+            r#"["a", 1, false]"#,
+            r#"{name: "Alice"}"#,
+        ] {
+            let pairs = CypherParser::parse(Rule::literal, literal)
+                .expect("literal should parse");
+            assert_eq!(pairs.as_str(), literal);
+        }
+    }
+
+    #[test]
+    fn parses_identifier_and_property_access_rules() {
+        let identifier = CypherParser::parse(Rule::identifier, "person_1")
+            .expect("identifier should parse");
+        let property_access = CypherParser::parse(Rule::property_access, "person.profile.name")
+            .expect("property access should parse");
+
+        assert_eq!(identifier.as_str(), "person_1");
+        assert_eq!(property_access.as_str(), "person.profile.name");
+    }
+
+    #[test]
+    fn parses_boolean_and_comparison_operator_rules() {
+        let boolean_expr = r#"NOT person.active = false AND person.age >= 21 OR person.score < 100"#;
+        let pairs = CypherParser::parse(Rule::boolean_expr, boolean_expr)
+            .expect("boolean expression should parse");
+
+        assert_eq!(pairs.as_str(), boolean_expr);
+    }
+
+    #[test]
+    fn parses_return_star_rule() {
+        let pairs = CypherParser::parse(Rule::return_clause, "RETURN *")
+            .expect("return star should parse");
+
+        assert_eq!(pairs.as_str(), "RETURN *");
+    }
+
+    #[test]
+    fn parses_node_and_relationship_pattern_variants() {
+        for pattern in [
+            "(n:Person)",
+            "(n)-[:KNOWS]->(m)",
+            "(n)<-[:KNOWS]-(m)",
+            "(n)-[:KNOWS]-(m)",
+        ] {
+            let pairs = CypherParser::parse(Rule::pattern, pattern)
+                .expect("pattern should parse");
+            assert_eq!(pairs.as_str(), pattern);
+        }
     }
 
     #[test]
@@ -690,6 +770,73 @@ mod tests {
                 _ => panic!("expected merge clause"),
             },
         }
+    }
+
+    #[test]
+    fn lowers_return_star_and_undirected_relationship() {
+        let query = parse_ast(r#"MATCH (a)-[r:KNOWS]-(b) RETURN *"#)
+            .expect("query should lower");
+
+        match query {
+            Query::Single(clauses) => {
+                match &clauses[0] {
+                    Clause::Match(patterns) => match &patterns[0] {
+                        Pattern::Path(path) => {
+                            assert_eq!(path.steps.len(), 1);
+                            assert_eq!(
+                                path.steps[0].relationship.direction,
+                                RelationshipDirection::Undirected
+                            );
+                        }
+                    },
+                    _ => panic!("expected match clause"),
+                }
+
+                match &clauses[1] {
+                    Clause::Return(items) => assert_eq!(items, &vec![ReturnItem::All]),
+                    _ => panic!("expected return clause"),
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn lowers_nested_property_maps_and_lists() {
+        let query = parse_ast(
+            r#"CREATE (n {profile: {name: "Alice"}, tags: ["a", "b"], score: -3.5}) RETURN n"#,
+        )
+        .expect("query should lower");
+
+        match query {
+            Query::Single(clauses) => match &clauses[0] {
+                Clause::Create(patterns) => match &patterns[0] {
+                    Pattern::Path(path) => {
+                        let props = path.start.properties.as_ref().expect("properties");
+                        assert_eq!(
+                            props.get("score"),
+                            Some(&Literal::Float(-3.5))
+                        );
+                        assert_eq!(
+                            props.get("tags"),
+                            Some(&Literal::List(vec![
+                                Literal::String("a".to_owned()),
+                                Literal::String("b".to_owned()),
+                            ]))
+                        );
+                        assert!(matches!(props.get("profile"), Some(Literal::Map(_))));
+                    }
+                },
+                _ => panic!("expected create clause"),
+            },
+        }
+    }
+
+    #[test]
+    fn rejects_invalid_string_escape() {
+        let error = parse_ast(r#"CREATE (n {name: "\u"}) RETURN n"#)
+            .expect_err("query should fail");
+
+        assert!(error.message.contains("unsupported"));
     }
 
     #[test]

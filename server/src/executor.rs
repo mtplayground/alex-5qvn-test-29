@@ -1051,6 +1051,41 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn executes_undirected_match_with_return_star() -> Result<(), sqlx::Error> {
+        let Some(pool) = test_pool().await? else {
+            return Ok(());
+        };
+        let fixture = fixture("undirected");
+        seed_one_hop_graph(&pool, &fixture).await?;
+
+        let plan = plan_query(
+            &parse_ast(&format!(
+                r#"
+                MATCH (n:Person {{name: "{name}"}})-[r:KNOWS]-(m:Person)
+                RETURN *
+                LIMIT 10
+                "#,
+                name = fixture.alice
+            ))
+            .expect("query should parse"),
+        )
+        .expect("query should plan");
+
+        let result = Executor::new(pool)
+            .execute(&plan)
+            .await
+            .expect("plan should execute");
+
+        assert_eq!(result.columns, vec!["m".to_owned(), "n".to_owned(), "r".to_owned()]);
+        assert_eq!(result.rows.len(), 2);
+        assert_eq!(result.graph.nodes.len(), 3);
+        assert_eq!(result.graph.edges.len(), 2);
+        assert!(result.rows.iter().all(|row| row.len() == 3));
+
+        Ok(())
+    }
+
+    #[tokio::test]
     async fn executes_two_hop_expand_chain() -> Result<(), sqlx::Error> {
         let Some(pool) = test_pool().await? else {
             return Ok(());

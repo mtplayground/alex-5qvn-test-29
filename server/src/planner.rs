@@ -482,6 +482,70 @@ mod tests {
     }
 
     #[test]
+    fn plans_undirected_match_with_return_star() {
+        let query = parse_ast(r#"MATCH (a:Person)-[r:KNOWS]-(b:Person) RETURN * LIMIT 2"#)
+            .expect("query should parse");
+
+        let plan = plan_query(&query).expect("query should plan");
+
+        assert_eq!(
+            plan.steps,
+            vec![
+                PlanStep::NodeScan(NodeScan {
+                    binding: "a".to_owned(),
+                    labels: vec!["Person".to_owned()],
+                    properties: BTreeMap::new(),
+                }),
+                PlanStep::Expand(EdgeExpand {
+                    from_binding: "a".to_owned(),
+                    edge_binding: "r".to_owned(),
+                    edge_type: Some("KNOWS".to_owned()),
+                    edge_properties: BTreeMap::new(),
+                    direction: crate::ast::RelationshipDirection::Undirected,
+                    to_binding: "b".to_owned(),
+                    to_labels: vec!["Person".to_owned()],
+                    to_properties: BTreeMap::new(),
+                }),
+                PlanStep::Project(Projection {
+                    items: vec![ProjectionItem::All],
+                }),
+                PlanStep::Limit(2),
+            ]
+        );
+    }
+
+    #[test]
+    fn plans_left_directed_match_pattern() {
+        let query = parse_ast(r#"MATCH (a)<-[r:LIKES]-(b:Person {name: "Bob"}) RETURN b"#)
+            .expect("query should parse");
+
+        let plan = plan_query(&query).expect("query should plan");
+
+        assert_eq!(plan.steps.len(), 3);
+        assert!(matches!(
+            &plan.steps[1],
+            PlanStep::Expand(EdgeExpand {
+                from_binding,
+                edge_binding,
+                edge_type: Some(edge_type),
+                direction: crate::ast::RelationshipDirection::Left,
+                to_binding,
+                to_labels,
+                to_properties,
+                ..
+            }) if from_binding == "a"
+                && edge_binding == "r"
+                && edge_type == "LIKES"
+                && to_binding == "b"
+                && to_labels == &vec!["Person".to_owned()]
+                && to_properties == &BTreeMap::from([(
+                    "name".to_owned(),
+                    Literal::String("Bob".to_owned()),
+                )])
+        ));
+    }
+
+    #[test]
     fn plans_create_node_and_edge_queries() {
         let query = parse_ast(
             r#"
