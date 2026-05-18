@@ -349,9 +349,9 @@ fn build_neighbor_expansion(rows: Vec<SqliteRow>) -> Result<NeighborExpansion, s
 
     for row in rows {
         let edge = Edge {
-            id: row.try_get("edge_id")?,
-            start_id: row.try_get("start_id")?,
-            end_id: row.try_get("end_id")?,
+            id: decode_uuid_column(&row, "edge_id")?,
+            start_id: decode_uuid_column(&row, "start_id")?,
+            end_id: decode_uuid_column(&row, "end_id")?,
             type_: row.try_get("type")?,
             properties: decode_json_properties(&row, "edge_properties")?,
         };
@@ -361,7 +361,7 @@ fn build_neighbor_expansion(rows: Vec<SqliteRow>) -> Result<NeighborExpansion, s
         }
 
         let node = Node {
-            id: row.try_get("node_id")?,
+            id: decode_uuid_column(&row, "node_id")?,
             labels: serde_json::from_str(&row.try_get::<String, _>("node_labels")?).unwrap_or_default(),
             properties: decode_json_properties(&row, "node_properties")?,
         };
@@ -372,6 +372,12 @@ fn build_neighbor_expansion(rows: Vec<SqliteRow>) -> Result<NeighborExpansion, s
     }
 
     Ok(NeighborExpansion { edges, nodes })
+}
+
+fn decode_uuid_column(row: &SqliteRow, column: &str) -> Result<Uuid, sqlx::Error> {
+    let value: String = row.try_get(column)?;
+    Uuid::parse_str(&value)
+        .map_err(|error| sqlx::Error::Decode(Box::new(error)))
 }
 
 fn decode_json_properties(row: &SqliteRow, column: &str) -> Result<Properties, sqlx::Error> {
