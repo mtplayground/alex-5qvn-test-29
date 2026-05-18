@@ -126,6 +126,29 @@ function App() {
               Root workspace
             </div>
           </div>
+          <nav
+            aria-label="Workspace sections"
+            className="flex flex-wrap gap-3 text-sm font-medium text-primary"
+          >
+            <a
+              className="rounded-full border border-primary/20 bg-primary/5 px-4 py-2 transition-colors hover:bg-primary/10"
+              href="#schema-sidebar"
+            >
+              Schema
+            </a>
+            <a
+              className="rounded-full border border-primary/20 bg-primary/5 px-4 py-2 transition-colors hover:bg-primary/10"
+              href="#query-workspace"
+            >
+              Query workspace
+            </a>
+            <a
+              className="rounded-full border border-primary/20 bg-primary/5 px-4 py-2 transition-colors hover:bg-primary/10"
+              href="#node-inspector"
+            >
+              Node inspector
+            </a>
+          </nav>
           <p className="max-w-4xl text-sm leading-6 text-muted-foreground sm:text-base">
             The graph canvas is the default surface for schema scans, Cypher execution,
             node expansion, and result inspection. The initial view auto-loads the
@@ -134,7 +157,10 @@ function App() {
         </div>
 
         <div className="grid gap-4 xl:grid-cols-[0.34fr_1fr_0.48fr]">
-          <aside className="rounded-[1.75rem] border border-border/70 bg-card/92 p-6 shadow-panel backdrop-blur">
+          <aside
+            id="schema-sidebar"
+            className="rounded-[1.75rem] border border-border/70 bg-card/92 p-6 shadow-panel backdrop-blur"
+          >
             <p className="text-xs font-semibold uppercase tracking-[0.24em] text-primary">
               Schema sidebar
             </p>
@@ -208,7 +234,7 @@ function App() {
             </div>
           </aside>
 
-          <div className="space-y-4">
+          <div id="query-workspace" className="space-y-4">
             <div className="grid gap-4 lg:grid-cols-2">
               <article className="rounded-[1.75rem] border border-border/70 bg-card/90 p-6 shadow-panel backdrop-blur">
                 <p className="text-xs font-semibold uppercase tracking-[0.24em] text-primary">
@@ -412,7 +438,10 @@ function App() {
             </article>
           </div>
 
-          <article className="rounded-[1.75rem] border border-border/70 bg-[#16373a] p-6 text-white shadow-panel">
+          <article
+            id="node-inspector"
+            className="rounded-[1.75rem] border border-border/70 bg-[#16373a] p-6 text-white shadow-panel"
+          >
             <p className="text-xs font-semibold uppercase tracking-[0.24em] text-white/60">
               Node inspector
             </p>
