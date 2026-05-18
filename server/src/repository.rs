@@ -32,6 +32,10 @@ impl NodeRepository {
         Self { pool }
     }
 
+    pub async fn scan(&self, limit: i64) -> Result<Vec<Node>, sqlx::Error> {
+        scan_nodes(&self.pool, limit).await
+    }
+
     pub async fn insert(&self, node: &Node) -> Result<Node, sqlx::Error> {
         insert_node(&self.pool, node).await
     }
@@ -115,6 +119,23 @@ where
         .bind(Json(&node.properties))
         .fetch_one(executor)
         .await
+}
+
+async fn scan_nodes<'e, E>(executor: E, limit: i64) -> Result<Vec<Node>, sqlx::Error>
+where
+    E: Executor<'e, Database = Postgres>,
+{
+    sqlx::query_as::<_, Node>(
+        r#"
+        SELECT id, labels, properties
+        FROM nodes
+        ORDER BY created_at ASC, id ASC
+        LIMIT $1
+        "#,
+    )
+    .bind(limit)
+    .fetch_all(executor)
+    .await
 }
 
 async fn get_node_by_id<'e, E>(executor: E, node_id: Uuid) -> Result<Option<Node>, sqlx::Error>
@@ -360,7 +381,7 @@ mod tests {
 
     use super::{
         catalog_query, expand_neighbors_query, filter_nodes_by_property, get_node_by_id,
-        insert_edge, insert_node, list_edges_by_endpoint, property_filter_value,
+        insert_edge, insert_node, list_edges_by_endpoint, property_filter_value, scan_nodes,
         scan_nodes_by_label, Edge, NeighborExpansion, Node, SchemaRepository,
     };
 
@@ -406,11 +427,13 @@ mod tests {
 
         let node = sample_named_node(Uuid::from_u128(10), "Person", "alice");
         let inserted = insert_node(&mut *tx, &node).await?;
+        let scanned_all = scan_nodes(&mut *tx, 10).await?;
         let fetched = get_node_by_id(&mut *tx, inserted.id).await?;
         let scanned = scan_nodes_by_label(&mut *tx, "Person", 10).await?;
         let filtered = filter_nodes_by_property(&mut *tx, "name", Value::String("alice".to_owned()), 10).await?;
 
         assert_eq!(inserted, node);
+        assert_eq!(scanned_all, vec![node.clone()]);
         assert_eq!(fetched, Some(node.clone()));
         assert_eq!(scanned, vec![node.clone()]);
         assert_eq!(filtered, vec![node]);
@@ -426,6 +449,7 @@ mod tests {
         };
         let mut tx = pool.begin().await?;
 
+        assert!(scan_nodes(&mut *tx, 10).await?.is_empty());
         assert_eq!(get_node_by_id(&mut *tx, Uuid::from_u128(999)).await?, None);
         assert!(scan_nodes_by_label(&mut *tx, "Missing", 10).await?.is_empty());
         assert!(filter_nodes_by_property(&mut *tx, "name", Value::String("nobody".to_owned()), 10).await?.is_empty());

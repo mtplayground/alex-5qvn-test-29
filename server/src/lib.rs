@@ -1,5 +1,6 @@
 pub mod ast;
 pub mod domain;
+pub mod executor;
 pub mod parser;
 pub mod planner;
 pub mod repository;
