@@ -392,6 +392,7 @@ function App() {
                   onNodeSelect={setInspectedNodeId}
                   onNodeDoubleClick={handleExpandNode}
                   onCanvasClear={() => setInspectedNodeId(null)}
+                  emptyMessage={resolveGraphEmptyMessage(cypherMutation.data)}
                   className="rounded-none border-0 shadow-none"
                 />
               ) : null}
@@ -560,6 +561,22 @@ function isMutationQuery(query: string) {
   const normalizedQuery = query.trimStart().toUpperCase()
 
   return normalizedQuery.startsWith('CREATE') || normalizedQuery.startsWith('MERGE')
+}
+
+function resolveGraphEmptyMessage(result: QueryResult | null | undefined) {
+  if (!result) {
+    return 'Run a Cypher query or select a node expansion to populate the canvas.'
+  }
+
+  if (result.graph.nodes.length === 0 && result.graph.edges.length === 0) {
+    if (result.rows.length === 0) {
+      return 'This query completed successfully but returned no graph rows.'
+    }
+
+    return 'This result contains table or scalar values, but no graph nodes or edges to render.'
+  }
+
+  return 'Run a Cypher query or select a node expansion to populate the canvas.'
 }
 
 function ResultTable({ result }: { result: QueryResult | null }) {

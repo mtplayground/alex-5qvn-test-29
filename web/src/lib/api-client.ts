@@ -33,12 +33,24 @@ async function request<T>(
     ...init,
   })
 
+  const payload = await readJsonBody(response)
+
   if (!response.ok) {
-    const payload = (await response.json()) as ApiErrorPayload
-    throw new ApiError(response.status, payload)
+    throw new ApiError(
+      response.status,
+      isApiErrorPayload(payload)
+        ? payload
+        : {
+            error:
+              response.statusText ||
+              'Request failed before a structured error payload could be read.',
+            line: null,
+            col: null,
+          },
+    )
   }
 
-  return (await response.json()) as T
+  return payload as T
 }
 
 export async function runCypherQuery(
@@ -58,4 +70,33 @@ export async function fetchNodeNeighbors(
   nodeId: string,
 ): Promise<NodeNeighborsResult> {
   return request<NodeNeighborsResult>(`/node/${nodeId}`)
+}
+
+async function readJsonBody(response: Response): Promise<unknown> {
+  const responseText = await response.text()
+
+  if (!responseText.trim()) {
+    return null
+  }
+
+  try {
+    return JSON.parse(responseText) as unknown
+  } catch {
+    return {
+      error: responseText,
+      line: null,
+      col: null,
+    } satisfies ApiErrorPayload
+  }
+}
+
+function isApiErrorPayload(value: unknown): value is ApiErrorPayload {
+  return (
+    typeof value === 'object' &&
+    value !== null &&
+    'error' in value &&
+    typeof value.error === 'string' &&
+    'line' in value &&
+    'col' in value
+  )
 }

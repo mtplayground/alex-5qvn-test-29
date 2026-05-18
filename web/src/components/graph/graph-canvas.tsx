@@ -39,6 +39,7 @@ export type GraphCanvasProps = {
   onNodeSelect?: (nodeId: string) => void
   onNodeDoubleClick?: (nodeId: string) => void
   onCanvasClear?: () => void
+  emptyMessage?: string
   className?: string
 }
 
@@ -49,6 +50,7 @@ export function GraphCanvas({
   onNodeSelect,
   onNodeDoubleClick,
   onCanvasClear,
+  emptyMessage,
   className,
 }: GraphCanvasProps) {
   const [nodePositions, setNodePositions] = useState<Array<{
@@ -285,7 +287,7 @@ export function GraphCanvas({
           <div ref={containerRef} className="h-full w-full" data-testid="graph-viewport" />
         ) : (
           <div className="flex h-full items-center justify-center px-8 text-center text-sm text-muted-foreground">
-            Run a Cypher query or select a node expansion to populate the canvas.
+            {emptyMessage ?? 'Run a Cypher query or select a node expansion to populate the canvas.'}
           </div>
         )}
       </div>
