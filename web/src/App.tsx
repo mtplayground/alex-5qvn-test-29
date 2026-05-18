@@ -119,7 +119,7 @@ function App() {
   }
 
   return (
-    <div>
+    <div className="min-h-screen bg-white/55">
       <AppShell
         badge="API client ready"
         title="Graph playground workspace"
