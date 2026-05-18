@@ -48,6 +48,15 @@ impl NodeRepository {
         scan_nodes_by_label(&self.pool, label, limit).await
     }
 
+    pub async fn get_by_label_and_property(
+        &self,
+        label: &str,
+        key: &str,
+        value: Value,
+    ) -> Result<Option<Node>, sqlx::Error> {
+        get_node_by_label_and_property(&self.pool, label, key, value).await
+    }
+
     pub async fn filter_by_property(
         &self,
         key: &str,
@@ -174,6 +183,33 @@ where
     .bind(label)
     .bind(limit)
     .fetch_all(executor)
+    .await
+}
+
+async fn get_node_by_label_and_property<'e, E>(
+    executor: E,
+    label: &str,
+    key: &str,
+    value: Value,
+) -> Result<Option<Node>, sqlx::Error>
+where
+    E: Executor<'e, Database = Postgres>,
+{
+    let property_filter = property_filter_value(key, value);
+
+    sqlx::query_as::<_, Node>(
+        r#"
+        SELECT id, labels, properties
+        FROM nodes
+        WHERE labels @> ARRAY[$1]::TEXT[]
+          AND properties @> $2
+        ORDER BY created_at ASC, id ASC
+        LIMIT 1
+        "#,
+    )
+    .bind(label)
+    .bind(Json(property_filter))
+    .fetch_optional(executor)
     .await
 }
 
@@ -381,6 +417,7 @@ mod tests {
 
     use super::{
         catalog_query, expand_neighbors_query, filter_nodes_by_property, get_node_by_id,
+        get_node_by_label_and_property,
         insert_edge, insert_node, list_edges_by_endpoint, property_filter_value, scan_nodes,
         scan_nodes_by_label, Edge, NeighborExpansion, Node, SchemaRepository,
     };
@@ -430,12 +467,20 @@ mod tests {
         let scanned_all = scan_nodes(&mut *tx, 10).await?;
         let fetched = get_node_by_id(&mut *tx, inserted.id).await?;
         let scanned = scan_nodes_by_label(&mut *tx, "Person", 10).await?;
+        let label_and_property = get_node_by_label_and_property(
+            &mut *tx,
+            "Person",
+            "name",
+            Value::String("alice".to_owned()),
+        )
+        .await?;
         let filtered = filter_nodes_by_property(&mut *tx, "name", Value::String("alice".to_owned()), 10).await?;
 
         assert_eq!(inserted, node);
         assert_eq!(scanned_all, vec![node.clone()]);
         assert_eq!(fetched, Some(node.clone()));
         assert_eq!(scanned, vec![node.clone()]);
+        assert_eq!(label_and_property, Some(node.clone()));
         assert_eq!(filtered, vec![node]);
 
         tx.rollback().await?;
@@ -452,6 +497,16 @@ mod tests {
         assert!(scan_nodes(&mut *tx, 10).await?.is_empty());
         assert_eq!(get_node_by_id(&mut *tx, Uuid::from_u128(999)).await?, None);
         assert!(scan_nodes_by_label(&mut *tx, "Missing", 10).await?.is_empty());
+        assert_eq!(
+            get_node_by_label_and_property(
+                &mut *tx,
+                "Missing",
+                "name",
+                Value::String("nobody".to_owned()),
+            )
+            .await?,
+            None
+        );
         assert!(filter_nodes_by_property(&mut *tx, "name", Value::String("nobody".to_owned()), 10).await?.is_empty());
 
         tx.rollback().await?;
