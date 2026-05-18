@@ -17,6 +17,7 @@ Transit-themed graph playground with a Rust `axum` server and a Vite/React front
 ## User-facing features
 
 - Default landing view is the graph workspace rather than a separate splash page
+- Startup and "Load sample query" behavior use the same default station scan query
 - CodeMirror-based Cypher editor with keyboard submit
 - Result tabs for graph, table, and raw JSON views
 - Schema sidebar with one-click label scans
@@ -55,6 +56,7 @@ Transit-themed graph playground with a Rust `axum` server and a Vite/React front
 
 - Frontend development runs on `:3000`; the backend serves the production bundle on `:8080`
 - The backend expects `web/dist` to exist before serving the UI
-- The default startup query is `MATCH (n) RETURN n LIMIT 25` and it is executed through the same frontend query path as manual runs
+- The default startup query is `MATCH (n:Station) RETURN n LIMIT 25` and it is executed through the same frontend query path as manual runs
+- The top-level graph node count shown in the workspace is derived from unique graph-node values in query result rows, not just the aggregated `graph.nodes` array
 - Release flow is frontend build first, then Rust release build
 - Production deployment is expected to use durable filesystem storage at `/data`
