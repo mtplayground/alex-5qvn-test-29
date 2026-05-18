@@ -2,6 +2,7 @@ use std::env;
 use std::error::Error;
 use std::fmt;
 use std::net::SocketAddr;
+use std::path::{Path, PathBuf};
 
 use axum::extract::State;
 use axum::http::StatusCode;
@@ -11,6 +12,7 @@ use axum::Router;
 use serde::Serialize;
 use sqlx::postgres::PgPoolOptions;
 use sqlx::PgPool;
+use tower_http::services::{ServeDir, ServeFile};
 use tracing::info;
 use tracing_subscriber::EnvFilter;
 
@@ -19,6 +21,7 @@ struct AppConfig {
     bind_addr: SocketAddr,
     database_url: String,
     seed_on_start: bool,
+    web_dist_dir: PathBuf,
 }
 
 impl AppConfig {
@@ -26,11 +29,13 @@ impl AppConfig {
         let bind_addr = parse_bind_addr(&read_env("BIND_ADDR")?)?;
         let database_url = read_env("DATABASE_URL")?;
         let seed_on_start = parse_bool_env(&read_env("SEED_ON_START")?)?;
+        let web_dist_dir = resolve_web_dist_dir()?;
 
         Ok(Self {
             bind_addr,
             database_url,
             seed_on_start,
+            web_dist_dir,
         })
     }
 }
@@ -49,6 +54,7 @@ enum ConfigError {
         name: &'static str,
         value: String,
     },
+    MissingWebDist(PathBuf),
 }
 
 impl fmt::Display for ConfigError {
@@ -58,6 +64,13 @@ impl fmt::Display for ConfigError {
             Self::InvalidBindAddr(error) => write!(f, "invalid BIND_ADDR value: {error}"),
             Self::InvalidBool { name, value } => {
                 write!(f, "invalid boolean value for `{name}`: `{value}`")
+            }
+            Self::MissingWebDist(path) => {
+                write!(
+                    f,
+                    "frontend build output not found at `{}`; run `npm run build` in `web/` first",
+                    path.display()
+                )
             }
         }
     }
@@ -85,6 +98,7 @@ async fn main() -> Result<(), Box<dyn Error>> {
         bind_addr = %config.bind_addr,
         seed_on_start = config.seed_on_start,
         database_ready = true,
+        web_dist_dir = %config.web_dist_dir.display(),
         "starting server",
     );
 
@@ -94,8 +108,11 @@ async fn main() -> Result<(), Box<dyn Error>> {
 }
 
 fn app_router(config: AppConfig, db_pool: PgPool) -> Router {
+    let web_dist_dir = config.web_dist_dir.clone();
+
     Router::new()
         .route("/healthz", get(healthz))
+        .fallback_service(static_assets_service(&web_dist_dir))
         .with_state(AppState { config, db_pool })
 }
 
@@ -142,4 +159,23 @@ async fn check_db_readiness(db_pool: &PgPool) -> Result<(), sqlx::Error> {
     sqlx::query("SELECT 1").execute(db_pool).await?;
     info!("database readiness check passed");
     Ok(())
+}
+
+fn resolve_web_dist_dir() -> Result<PathBuf, ConfigError> {
+    let repo_root = Path::new(env!("CARGO_MANIFEST_DIR"))
+        .parent()
+        .ok_or_else(|| ConfigError::MissingWebDist(PathBuf::from("web/dist")))?;
+    let web_dist_dir = repo_root.join("web").join("dist");
+
+    if web_dist_dir.is_dir() {
+        Ok(web_dist_dir)
+    } else {
+        Err(ConfigError::MissingWebDist(web_dist_dir))
+    }
+}
+
+fn static_assets_service(web_dist_dir: &Path) -> ServeDir<ServeFile> {
+    let index_file = web_dist_dir.join("index.html");
+
+    ServeDir::new(web_dist_dir).fallback(ServeFile::new(index_file))
 }
