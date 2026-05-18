@@ -4,8 +4,10 @@ use std::fmt;
 use std::net::SocketAddr;
 use std::path::{Path as FsPath, PathBuf};
 
+use axum::extract::rejection::{JsonRejection, PathRejection};
 use axum::extract::{Path, State};
-use axum::http::StatusCode;
+use axum::http::{Method, StatusCode};
+use axum::response::{IntoResponse, Response};
 use axum::routing::{get, post};
 use axum::Json;
 use axum::Router;
@@ -18,7 +20,9 @@ use server::planner::plan_query;
 use server::repository::{EdgeRepository, NodeRepository, SchemaRepository};
 use sqlx::postgres::PgPoolOptions;
 use sqlx::PgPool;
+use tower_http::cors::{Any, CorsLayer};
 use tower_http::services::{ServeDir, ServeFile};
+use tower_http::trace::TraceLayer;
 use tracing::info;
 use tracing_subscriber::EnvFilter;
 
@@ -95,11 +99,78 @@ struct CypherRequest {
     params: Option<JsonValue>,
 }
 
-#[derive(Debug, Serialize)]
+#[derive(Debug, Serialize, Deserialize)]
 struct ErrorResponse {
     error: String,
     line: Option<usize>,
     col: Option<usize>,
+}
+
+#[derive(Debug)]
+struct AppError {
+    status: StatusCode,
+    error: String,
+    line: Option<usize>,
+    col: Option<usize>,
+}
+
+impl AppError {
+    fn new(status: StatusCode, error: impl Into<String>) -> Self {
+        Self {
+            status,
+            error: error.into(),
+            line: None,
+            col: None,
+        }
+    }
+
+    fn with_position(
+        status: StatusCode,
+        error: impl Into<String>,
+        line: Option<usize>,
+        col: Option<usize>,
+    ) -> Self {
+        Self {
+            status,
+            error: error.into(),
+            line,
+            col,
+        }
+    }
+
+    fn bad_request(error: impl Into<String>) -> Self {
+        Self::new(StatusCode::BAD_REQUEST, error)
+    }
+
+    fn not_found(error: impl Into<String>) -> Self {
+        Self::new(StatusCode::NOT_FOUND, error)
+    }
+}
+
+impl IntoResponse for AppError {
+    fn into_response(self) -> Response {
+        (
+            self.status,
+            Json(ErrorResponse {
+                error: self.error,
+                line: self.line,
+                col: self.col,
+            }),
+        )
+            .into_response()
+    }
+}
+
+impl From<JsonRejection> for AppError {
+    fn from(rejection: JsonRejection) -> Self {
+        Self::bad_request(format!("invalid JSON request body: {rejection}"))
+    }
+}
+
+impl From<PathRejection> for AppError {
+    fn from(rejection: PathRejection) -> Self {
+        Self::bad_request(format!("invalid path parameter: {rejection}"))
+    }
 }
 
 #[derive(Debug, Serialize, Deserialize, PartialEq)]
@@ -142,6 +213,13 @@ fn app_router(config: AppConfig, db_pool: PgPool) -> Router {
         .route("/node/:id", get(node_details))
         .route("/cypher", post(cypher))
         .fallback_service(static_assets_service(&web_dist_dir))
+        .layer(
+            CorsLayer::new()
+                .allow_origin(Any)
+                .allow_methods([Method::GET, Method::POST, Method::OPTIONS])
+                .allow_headers(Any),
+        )
+        .layer(TraceLayer::new_for_http())
         .with_state(AppState { config, db_pool })
 }
 
@@ -156,21 +234,23 @@ async fn healthz(State(state): State<AppState>) -> (StatusCode, Json<HealthRespo
 
 async fn schema(
     State(state): State<AppState>,
-) -> Result<Json<SchemaCatalog>, (StatusCode, Json<ErrorResponse>)> {
+) -> Result<Json<SchemaCatalog>, AppError> {
     execute_schema_request(&state.db_pool).await.map(Json)
 }
 
 async fn node_details(
     State(state): State<AppState>,
-    Path(node_id): Path<uuid::Uuid>,
-) -> Result<Json<NodeNeighborsResponse>, (StatusCode, Json<ErrorResponse>)> {
+    node_id: Result<Path<uuid::Uuid>, PathRejection>,
+) -> Result<Json<NodeNeighborsResponse>, AppError> {
+    let Path(node_id) = node_id.map_err(AppError::from)?;
     execute_node_request(&state.db_pool, node_id).await.map(Json)
 }
 
 async fn cypher(
     State(state): State<AppState>,
-    Json(request): Json<CypherRequest>,
-) -> Result<Json<QueryResult>, (StatusCode, Json<ErrorResponse>)> {
+    request: Result<Json<CypherRequest>, JsonRejection>,
+) -> Result<Json<QueryResult>, AppError> {
+    let Json(request) = request.map_err(AppError::from)?;
     execute_cypher_request(&state.db_pool, request)
         .await
         .map(Json)
@@ -179,107 +259,49 @@ async fn cypher(
 async fn execute_cypher_request(
     db_pool: &PgPool,
     request: CypherRequest,
-) -> Result<QueryResult, (StatusCode, Json<ErrorResponse>)> {
+) -> Result<QueryResult, AppError> {
     let _ = &request.params;
 
     let ast = parse_ast(&request.query).map_err(|error| {
-        (
+        AppError::with_position(
             StatusCode::BAD_REQUEST,
-            Json(ErrorResponse {
-                error: error.message,
-                line: Some(error.line),
-                col: Some(error.column),
-            }),
+            error.message,
+            Some(error.line),
+            Some(error.column),
         )
     })?;
 
-    let plan = plan_query(&ast).map_err(|error| {
-        (
-            StatusCode::BAD_REQUEST,
-            Json(ErrorResponse {
-                error: error.message,
-                line: None,
-                col: None,
-            }),
-        )
-    })?;
+    let plan = plan_query(&ast).map_err(|error| AppError::bad_request(error.message))?;
 
     server::executor::execute_plan(db_pool.clone(), &plan)
         .await
-        .map_err(|error| {
-            (
-                StatusCode::BAD_REQUEST,
-                Json(ErrorResponse {
-                    error: error.message,
-                    line: None,
-                    col: None,
-                }),
-            )
-        })
+        .map_err(|error| AppError::bad_request(error.message))
 }
 
-async fn execute_schema_request(
-    db_pool: &PgPool,
-) -> Result<SchemaCatalog, (StatusCode, Json<ErrorResponse>)> {
+async fn execute_schema_request(db_pool: &PgPool) -> Result<SchemaCatalog, AppError> {
     SchemaRepository::new(db_pool.clone())
         .catalog()
         .await
-        .map_err(|error| {
-            (
-                StatusCode::BAD_REQUEST,
-                Json(ErrorResponse {
-                    error: format!("repository error: {error}"),
-                    line: None,
-                    col: None,
-                }),
-            )
-        })
+        .map_err(|error| AppError::bad_request(format!("repository error: {error}")))
 }
 
 async fn execute_node_request(
     db_pool: &PgPool,
     node_id: uuid::Uuid,
-) -> Result<NodeNeighborsResponse, (StatusCode, Json<ErrorResponse>)> {
+) -> Result<NodeNeighborsResponse, AppError> {
     let node_repository = NodeRepository::new(db_pool.clone());
     let edge_repository = EdgeRepository::new(db_pool.clone());
 
     let node = node_repository
         .get_by_id(node_id)
         .await
-        .map_err(|error| {
-            (
-                StatusCode::BAD_REQUEST,
-                Json(ErrorResponse {
-                    error: format!("repository error: {error}"),
-                    line: None,
-                    col: None,
-                }),
-            )
-        })?
-        .ok_or_else(|| {
-            (
-                StatusCode::NOT_FOUND,
-                Json(ErrorResponse {
-                    error: format!("node not found: {node_id}"),
-                    line: None,
-                    col: None,
-                }),
-            )
-        })?;
+        .map_err(|error| AppError::bad_request(format!("repository error: {error}")))?
+        .ok_or_else(|| AppError::not_found(format!("node not found: {node_id}")))?;
 
     let neighbors = edge_repository
         .expand_neighbors(node_id, None)
         .await
-        .map_err(|error| {
-            (
-                StatusCode::BAD_REQUEST,
-                Json(ErrorResponse {
-                    error: format!("repository error: {error}"),
-                    line: None,
-                    col: None,
-                }),
-            )
-        })?;
+        .map_err(|error| AppError::bad_request(format!("repository error: {error}")))?;
 
     Ok(NodeNeighborsResponse {
         node,
@@ -345,17 +367,22 @@ fn static_assets_service(web_dist_dir: &FsPath) -> ServeDir<ServeFile> {
 
 #[cfg(test)]
 mod tests {
+    use std::path::PathBuf;
     use std::time::{SystemTime, UNIX_EPOCH};
 
     use super::{
-        execute_cypher_request, execute_node_request, execute_schema_request, CypherRequest,
-        NodeNeighborsResponse,
+        app_router, execute_cypher_request, execute_node_request, execute_schema_request,
+        AppConfig, CypherRequest, ErrorResponse, NodeNeighborsResponse,
     };
+    use axum::body::{to_bytes, Body};
     use axum::http::StatusCode;
+    use axum::http::{Method, Request};
+    use axum::response::IntoResponse;
     use serde_json::json;
     use serde_json::Value as JsonValue;
     use sqlx::postgres::PgPoolOptions;
     use sqlx::PgPool;
+    use tower::ServiceExt;
     use uuid::Uuid;
 
     use server::domain::{Edge, Node, Properties, SchemaCatalog};
@@ -378,10 +405,14 @@ mod tests {
         .await
         .expect_err("request should fail");
 
-        assert_eq!(error.0, StatusCode::BAD_REQUEST);
-        assert!(error.1 .0.error.contains("expected"));
-        assert!(error.1 .0.line.is_some());
-        assert!(error.1 .0.col.is_some());
+        let response = error.into_response();
+        let status = response.status();
+        let payload: ErrorResponse = response_json(response).await;
+
+        assert_eq!(status, StatusCode::BAD_REQUEST);
+        assert!(payload.error.contains("expected"));
+        assert!(payload.line.is_some());
+        assert!(payload.col.is_some());
 
         Ok(())
     }
@@ -435,10 +466,14 @@ mod tests {
         .await
         .expect_err("request should fail");
 
-        assert_eq!(error.0, StatusCode::BAD_REQUEST);
-        assert!(error.1 .0.error.contains("MERGE"));
-        assert_eq!(error.1 .0.line, None);
-        assert_eq!(error.1 .0.col, None);
+        let response = error.into_response();
+        let status = response.status();
+        let payload: ErrorResponse = response_json(response).await;
+
+        assert_eq!(status, StatusCode::BAD_REQUEST);
+        assert!(payload.error.contains("MERGE"));
+        assert_eq!(payload.line, None);
+        assert_eq!(payload.col, None);
 
         Ok(())
     }
@@ -527,12 +562,108 @@ mod tests {
             .await
             .expect_err("node request should fail");
 
-        assert_eq!(error.0, StatusCode::NOT_FOUND);
-        assert!(error.1 .0.error.contains("node not found"));
-        assert_eq!(error.1 .0.line, None);
-        assert_eq!(error.1 .0.col, None);
+        let response = error.into_response();
+        let status = response.status();
+        let payload: ErrorResponse = response_json(response).await;
+
+        assert_eq!(status, StatusCode::NOT_FOUND);
+        assert!(payload.error.contains("node not found"));
+        assert_eq!(payload.line, None);
+        assert_eq!(payload.col, None);
 
         Ok(())
+    }
+
+    #[tokio::test]
+    async fn app_router_returns_json_error_for_invalid_request_body() -> Result<(), sqlx::Error> {
+        let Some(pool) = test_pool().await? else {
+            return Ok(());
+        };
+        let app = test_app(pool);
+
+        let response = app
+            .oneshot(
+                Request::builder()
+                    .method(Method::POST)
+                    .uri("/cypher")
+                    .header("content-type", "application/json")
+                    .body(Body::from("{\"query\":"))
+                    .expect("request should build"),
+            )
+            .await
+            .expect("request should complete");
+
+        let status = response.status();
+        let payload: ErrorResponse = response_json(response).await;
+
+        assert_eq!(status, StatusCode::BAD_REQUEST);
+        assert!(payload.error.contains("invalid JSON request body"));
+        assert_eq!(payload.line, None);
+        assert_eq!(payload.col, None);
+
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn app_router_applies_cors_headers() -> Result<(), sqlx::Error> {
+        let Some(pool) = test_pool().await? else {
+            return Ok(());
+        };
+        let app = test_app(pool);
+
+        let response = app
+            .oneshot(
+                Request::builder()
+                    .method(Method::OPTIONS)
+                    .uri("/cypher")
+                    .header("origin", "http://localhost:3000")
+                    .header("access-control-request-method", "POST")
+                    .body(Body::empty())
+                    .expect("request should build"),
+            )
+            .await
+            .expect("request should complete");
+
+        assert_eq!(response.status(), StatusCode::OK);
+        assert_eq!(
+            response
+                .headers()
+                .get("access-control-allow-origin")
+                .and_then(|value| value.to_str().ok()),
+            Some("*")
+        );
+        assert!(
+            response
+                .headers()
+                .contains_key("access-control-allow-methods")
+        );
+
+        Ok(())
+    }
+
+    async fn response_json<T>(response: axum::response::Response) -> T
+    where
+        T: serde::de::DeserializeOwned,
+    {
+        let body = to_bytes(response.into_body(), usize::MAX)
+            .await
+            .expect("body should be readable");
+        serde_json::from_slice(&body).expect("body should contain valid JSON")
+    }
+
+    fn test_app(pool: PgPool) -> axum::Router {
+        app_router(test_config(), pool)
+    }
+
+    fn test_config() -> AppConfig {
+        AppConfig {
+            bind_addr: "127.0.0.1:8080"
+                .parse()
+                .expect("test bind address should parse"),
+            database_url: "postgres://example.invalid/test".to_owned(),
+            seed_on_start: false,
+            web_dist_dir: PathBuf::from("/workspace/web/dist"),
+        }
     }
 
     async fn test_pool() -> Result<Option<PgPool>, sqlx::Error> {
