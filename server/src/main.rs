@@ -18,6 +18,7 @@ use server::executor::QueryResult;
 use server::parser::parse_ast;
 use server::planner::plan_query;
 use server::repository::{EdgeRepository, NodeRepository, SchemaRepository};
+use server::seed::{load_seed_data, SeedError, SeedReport, SeedStatus};
 use sqlx::postgres::PgPoolOptions;
 use sqlx::PgPool;
 use tower_http::cors::{Any, CorsLayer};
@@ -188,6 +189,7 @@ async fn main() -> Result<(), Box<dyn Error>> {
     let config = AppConfig::from_env()?;
     let db_pool = create_db_pool(&config.database_url).await?;
     check_db_readiness(&db_pool).await?;
+    let seed_report = seed_on_startup(&db_pool, config.seed_on_start).await?;
     let app = app_router(config.clone(), db_pool.clone());
     let listener = tokio::net::TcpListener::bind(config.bind_addr).await?;
 
@@ -195,6 +197,7 @@ async fn main() -> Result<(), Box<dyn Error>> {
         bind_addr = %config.bind_addr,
         seed_on_start = config.seed_on_start,
         database_ready = true,
+        seed_status = ?seed_report.status,
         web_dist_dir = %config.web_dist_dir.display(),
         "starting server",
     );
@@ -346,6 +349,34 @@ async fn check_db_readiness(db_pool: &PgPool) -> Result<(), sqlx::Error> {
     Ok(())
 }
 
+async fn seed_on_startup(db_pool: &PgPool, seed_on_start: bool) -> Result<SeedReport, SeedError> {
+    let report = load_seed_data(db_pool, seed_on_start).await?;
+    log_seed_report("startup", &report);
+    Ok(report)
+}
+
+fn log_seed_report(context: &str, report: &SeedReport) {
+    match report.status {
+        SeedStatus::SkippedDisabled => {
+            info!(context, "seed loader skipped because SEED_ON_START is false");
+        }
+        SeedStatus::SkippedSentinel => {
+            info!(context, "seed loader skipped because seed sentinel already exists");
+        }
+        SeedStatus::Loaded => {
+            info!(
+                context,
+                datasets = report.datasets,
+                nodes_created = report.nodes_created,
+                nodes_matched = report.nodes_matched,
+                edges_created = report.edges_created,
+                edges_matched = report.edges_matched,
+                "seed loader completed",
+            );
+        }
+    }
+}
+
 fn resolve_web_dist_dir() -> Result<PathBuf, ConfigError> {
     let repo_root = FsPath::new(env!("CARGO_MANIFEST_DIR"))
         .parent()
@@ -371,7 +402,7 @@ mod tests {
     use std::time::{SystemTime, UNIX_EPOCH};
 
     use super::{
-        app_router, AppConfig, ErrorResponse, NodeNeighborsResponse,
+        app_router, seed_on_startup, AppConfig, ErrorResponse, NodeNeighborsResponse,
     };
     use axum::body::{to_bytes, Body};
     use axum::http::StatusCode;
@@ -386,6 +417,7 @@ mod tests {
     use server::domain::{Edge, Node, Properties, SchemaCatalog};
     use server::executor::QueryResult;
     use server::repository::{EdgeRepository, NodeRepository};
+    use server::seed::SeedStatus;
     use server::MIGRATOR;
 
     #[tokio::test]
@@ -673,6 +705,18 @@ mod tests {
                 .contains_key("access-control-allow-methods")
         );
 
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn startup_hook_skips_when_disabled() -> Result<(), Box<dyn std::error::Error>> {
+        let Some(pool) = test_pool().await? else {
+            return Ok(());
+        };
+
+        let report = seed_on_startup(&pool, false).await?;
+
+        assert_eq!(report.status, SeedStatus::SkippedDisabled);
         Ok(())
     }
 
